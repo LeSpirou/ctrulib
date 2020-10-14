@@ -5,44 +5,256 @@
 #include <3ds/svc.h>
 #include <3ds/srv.h>
 #include <3ds/synchronization.h>
+#include <3ds/allocator/mappable.h>
 #include <3ds/services/gspgpu.h>
 #include <3ds/ipc.h>
 #include <3ds/thread.h>
 
 #define GSP_EVENT_STACK_SIZE 0x1000
 
-Handle gspGpuHandle;
+static Handle gspGpuHandle;
 static int gspRefCount;
 
-static s32 gspLastEvent = -1;
+static Handle gspSharedMemHandle;
+static void* gspSharedMem;
+static u8 gspThreadId;
+
+static bool gspGpuRight;
+
+static Handle gspEvent;
+static Thread gspEventThread;
+static volatile bool gspRunEvents;
+
+static s32 gspLastEvent;
 static LightEvent gspEvents[GSPGPU_EVENT_MAX];
-static vu32 gspEventCounts[GSPGPU_EVENT_MAX];
 static ThreadFunc gspEventCb[GSPGPU_EVENT_MAX];
 static void* gspEventCbData[GSPGPU_EVENT_MAX];
 static bool gspEventCbOneShot[GSPGPU_EVENT_MAX];
-static volatile bool gspRunEvents;
-static Thread gspEventThread;
-
-static Handle gspEvent;
-static vu8* gspEventData;
 
 static void gspEventThreadMain(void *arg);
 
-Handle __sync_get_arbiter(void);
+static inline void gspWriteGxReg(u32 offset, u32 data)
+{
+	GSPGPU_WriteHWRegs(0x400000 + offset, &data, 4);
+}
+
+static inline void gspWriteGxRegMasked(u32 offset, u32 data, u32 mask)
+{
+	GSPGPU_WriteHWRegsWithMask(0x400000 + offset, &data, 4, &mask, 4);
+}
+
+// Hardware initialization for first-time GSP users (matching official software).
+static void gspHardwareInit(void)
+{
+	// Some GPU-internal init registers
+	gspWriteGxReg(0x1000, 0);
+	gspWriteGxReg(0x1080, 0x12345678);
+	gspWriteGxReg(0x10C0, 0xFFFFFFF0);
+	gspWriteGxReg(0x10D0, 1);
+	gspWriteGxReg(0x1914, 1); // homebrew addition: make sure GPUREG_START_DRAW_FUNC0 starts off in configuration mode
+
+	// Top screen LCD configuration, see https://www.3dbrew.org/wiki/GPU/External_Registers#LCD_Source_Framebuffer_Setup
+
+	// Top screen sync registers:
+	gspWriteGxReg(0x0400, 0x1C2);
+	gspWriteGxReg(0x0404, 0xD1);
+	gspWriteGxReg(0x0408, 0x1C1);
+	gspWriteGxReg(0x040C, 0x1C1);
+	gspWriteGxReg(0x0410, 0);
+	gspWriteGxReg(0x0414, 0xCF);
+	gspWriteGxReg(0x0418, 0xD1);
+	gspWriteGxReg(0x041C, (0x1C5 << 16) | 0x1C1);
+	gspWriteGxReg(0x0420, 0x10000);
+	gspWriteGxReg(0x0424, 0x19D);
+	gspWriteGxReg(0x0428, 2);
+	gspWriteGxReg(0x042C, 0x192);
+	gspWriteGxReg(0x0430, 0x192);
+	gspWriteGxReg(0x0434, 0x192);
+	gspWriteGxReg(0x0438, 1);
+	gspWriteGxReg(0x043C, 2);
+	gspWriteGxReg(0x0440, (0x196 << 16) | 0x192);
+	gspWriteGxReg(0x0444, 0);
+	gspWriteGxReg(0x0448, 0);
+
+	// Top screen fb geometry
+	gspWriteGxReg(0x045C, (400 << 16) | 240); // dimensions
+	gspWriteGxReg(0x0460, (0x1C1 << 16) | 0xD1);
+	gspWriteGxReg(0x0464, (0x192 << 16) | 2);
+
+	// Top screen framebuffer format (initial)
+	gspWriteGxReg(0x0470, 0x80340);
+
+	// Top screen unknown reg @ 0x9C
+	gspWriteGxReg(0x049C, 0);
+
+	// Bottom screen LCD configuration
+
+	// Bottom screen sync registers:
+	gspWriteGxReg(0x0500, 0x1C2);
+	gspWriteGxReg(0x0504, 0xD1);
+	gspWriteGxReg(0x0508, 0x1C1);
+	gspWriteGxReg(0x050C, 0x1C1);
+	gspWriteGxReg(0x0510, 0xCD);
+	gspWriteGxReg(0x0514, 0xCF);
+	gspWriteGxReg(0x0518, 0xD1);
+	gspWriteGxReg(0x051C, (0x1C5 << 16) | 0x1C1);
+	gspWriteGxReg(0x0520, 0x10000);
+	gspWriteGxReg(0x0524, 0x19D);
+	gspWriteGxReg(0x0528, 0x52);
+	gspWriteGxReg(0x052C, 0x192);
+	gspWriteGxReg(0x0530, 0x192);
+	gspWriteGxReg(0x0534, 0x4F);
+	gspWriteGxReg(0x0538, 0x50);
+	gspWriteGxReg(0x053C, 0x52);
+	gspWriteGxReg(0x0540, (0x198 << 16) | 0x194);
+	gspWriteGxReg(0x0544, 0);
+	gspWriteGxReg(0x0548, 0x11);
+
+	// Bottom screen fb geometry
+	gspWriteGxReg(0x055C, (320 << 16) | 240); // dimensions
+	gspWriteGxReg(0x0560, (0x1C1 << 16) | 0xD1);
+	gspWriteGxReg(0x0564, (0x192 << 16) | 0x52);
+
+	// Bottom screen framebuffer format (initial)
+	gspWriteGxReg(0x0570, 0x80300);
+
+	// Bottom screen unknown reg @ 0x9C
+	gspWriteGxReg(0x059C, 0);
+
+	// Initial, blank framebuffer (top left A/B, bottom A/B, top right A/B)
+	gspWriteGxReg(0x0468, 0x18300000);
+	gspWriteGxReg(0x046C, 0x18300000);
+	gspWriteGxReg(0x0568, 0x18300000);
+	gspWriteGxReg(0x056C, 0x18300000);
+	gspWriteGxReg(0x0494, 0x18300000);
+	gspWriteGxReg(0x0498, 0x18300000);
+
+	// Framebuffer select: A
+	gspWriteGxReg(0x0478, 1);
+	gspWriteGxReg(0x0578, 1);
+
+	// Clear DMA transfer (PPF) "transfer finished" bit
+	gspWriteGxRegMasked(0x0C18, 0, 0xFF00);
+
+	// GX_GPU_CLK |= 0x70000 (value is 0x100 when gsp starts, enough to at least display framebuffers & have memory fill work)
+	// This enables the clock to some GPU components
+	gspWriteGxReg(0x0004, 0x70100);
+
+	// Clear Memory Fill (PSC0 and PSC1) "busy" and "finished" bits
+	gspWriteGxRegMasked(0x001C, 0, 0xFF);
+	gspWriteGxRegMasked(0x002C, 0, 0xFF);
+
+	// More init registers
+	gspWriteGxReg(0x0050, 0x22221200);
+	gspWriteGxRegMasked(0x0054, 0xFF2, 0xFFFF);
+
+	// Enable some LCD clocks (?) (unsure)
+	gspWriteGxReg(0x0474, 0x10501);
+	gspWriteGxReg(0x0574, 0x10501);
+}
 
 Result gspInit(void)
 {
-	Result res=0;
+	Result ret=0;
 	if (AtomicPostIncrement(&gspRefCount)) return 0;
-	res = srvGetServiceHandle(&gspGpuHandle, "gsp::Gpu");
-	if (R_FAILED(res)) AtomicDecrement(&gspRefCount);
-	return res;
+
+	// Initialize events
+	for (int i = 0; i < GSPGPU_EVENT_MAX; i ++)
+		LightEvent_Init(&gspEvents[i], RESET_STICKY);
+
+	// Retrieve a GSP service session handle
+	ret = srvGetServiceHandle(&gspGpuHandle, "gsp::Gpu");
+	if (R_FAILED(ret)) goto _fail0;
+
+	// Acquire GPU rights
+	ret = GSPGPU_AcquireRight(0);
+	if (R_FAILED(ret)) goto _fail1;
+
+	// Register ourselves as a user of graphics hardware
+	svcCreateEvent(&gspEvent, RESET_ONESHOT);
+	ret = GSPGPU_RegisterInterruptRelayQueue(gspEvent, 0x1, &gspSharedMemHandle, &gspThreadId);
+	if (R_FAILED(ret))
+		goto _fail2;
+
+	// Initialize the hardware if we are the first process to register
+	if (ret == 0x2A07)
+		gspHardwareInit();
+
+	// Map GSP shared memory
+	gspSharedMem = mappableAlloc(0x1000);
+	svcMapMemoryBlock(gspSharedMemHandle, (u32)gspSharedMem, MEMPERM_READWRITE, MEMPERM_DONTCARE);
+
+	// Start event handling thread
+	gspRunEvents = true;
+	gspLastEvent = -1;
+	gspEventThread = threadCreate(gspEventThreadMain, 0x0, GSP_EVENT_STACK_SIZE, 0x1A, -2, true);
+	return 0;
+
+_fail2:
+	GSPGPU_ReleaseRight();
+_fail1:
+	svcCloseHandle(gspGpuHandle);
+_fail0:
+	AtomicDecrement(&gspRefCount);
+	return ret;
 }
 
 void gspExit(void)
 {
 	if (AtomicDecrement(&gspRefCount)) return;
+
+	// Stop event handling thread
+	gspRunEvents = false;
+	svcSignalEvent(gspEvent);
+	threadJoin(gspEventThread, U64_MAX);
+
+	// Unmap and close GSP shared memory
+	svcUnmapMemoryBlock(gspSharedMemHandle, (u32)gspSharedMem);
+	svcCloseHandle(gspSharedMemHandle);
+	mappableFree(gspSharedMem);
+
+	// Unregister ourselves
+	GSPGPU_UnregisterInterruptRelayQueue();
+
+	// Release GPU rights and close the service handle
+	GSPGPU_ReleaseRight();
 	svcCloseHandle(gspGpuHandle);
+}
+
+bool gspHasGpuRight(void)
+{
+	return gspGpuRight;
+}
+
+void gspPresentBuffer(unsigned screen, unsigned swap, const void* fb_a, const void* fb_b, u32 stride, u32 mode)
+{
+	GSPGPU_FramebufferInfo info;
+	info.active_framebuf = swap;
+	info.framebuf0_vaddr = (u32*)fb_a;
+	info.framebuf1_vaddr = (u32*)fb_b;
+	info.framebuf_widthbytesize = stride;
+	info.format = mode;
+	info.framebuf_dispselect = swap;
+	info.unk = 0;
+
+	s32* fbInfoHeader = (s32*)((u8*)gspSharedMem + 0x200 + gspThreadId*0x80 + screen*0x40);
+	GSPGPU_FramebufferInfo* fbInfos = (GSPGPU_FramebufferInfo*)&fbInfoHeader[1];
+	unsigned pos = 1 - (*fbInfoHeader & 0xff);
+	fbInfos[pos] = info;
+	__dsb();
+
+	union
+	{
+		s32 header;
+		struct { u8 swap, update; };
+	} u;
+
+	do
+	{
+		u.header = __ldrex(fbInfoHeader);
+		u.swap = pos;
+		u.update = 1;
+	} while (__strex(fbInfoHeader, u.header));
 }
 
 void gspSetEventCallback(GSPGPU_Event id, ThreadFunc cb, void* data, bool oneShot)
@@ -52,29 +264,6 @@ void gspSetEventCallback(GSPGPU_Event id, ThreadFunc cb, void* data, bool oneSho
 	gspEventCb[id] = cb;
 	gspEventCbData[id] = data;
 	gspEventCbOneShot[id] = oneShot;
-}
-
-Result gspInitEventHandler(Handle _gspEvent, vu8* _gspSharedMem, u8 gspThreadId)
-{
-	// Initialize events
-	int i;
-	for (i = 0; i < GSPGPU_EVENT_MAX; i ++)
-		LightEvent_Init(&gspEvents[i], RESET_STICKY);
-
-	// Start event thread
-	gspEvent = _gspEvent;
-	gspEventData = _gspSharedMem + gspThreadId*0x40;
-	gspRunEvents = true;
-	gspEventThread = threadCreate(gspEventThreadMain, 0x0, GSP_EVENT_STACK_SIZE, 0x1A, -2, true);
-	return 0;
-}
-
-void gspExitEventHandler(void)
-{
-	// Stop event thread
-	gspRunEvents = false;
-	svcSignalEvent(gspEvent);
-	threadJoin(gspEventThread, U64_MAX);
 }
 
 void gspWaitForEvent(GSPGPU_Event id, bool nextEvent)
@@ -103,7 +292,7 @@ GSPGPU_Event gspWaitForAnyEvent(void)
 			}
 		} while (__strex(&gspLastEvent, -1));
 		if (x < 0)
-			svcArbitrateAddress(__sync_get_arbiter(), (u32)&gspLastEvent, ARBITRATION_WAIT_IF_LESS_THAN, 0, 0);
+			syncArbitrateAddress(&gspLastEvent, ARBITRATION_WAIT_IF_LESS_THAN, 0);
 	} while (x < 0);
 	return (GSPGPU_Event)x;
 }
@@ -112,6 +301,7 @@ static int popInterrupt()
 {
 	int curEvt;
 	bool strexFailed;
+	u8* gspEventData = (u8*)gspSharedMem + gspThreadId*0x40;
 	do {
 		union {
 			struct {
@@ -156,6 +346,9 @@ void gspEventThreadMain(void *arg)
 		svcWaitSynchronization(gspEvent, U64_MAX);
 		svcClearEvent(gspEvent);
 
+		if (!gspRunEvents)
+			break;
+
 		while (true)
 		{
 			int curEvt = popInterrupt();
@@ -177,8 +370,7 @@ void gspEventThreadMain(void *arg)
 				do
 					__ldrex(&gspLastEvent);
 				while (__strex(&gspLastEvent, curEvt));
-				svcArbitrateAddress(__sync_get_arbiter(), (u32)&gspLastEvent, ARBITRATION_SIGNAL, 1, 0);
-				gspEventCounts[curEvt]++;
+				syncArbitrateAddress(&gspLastEvent, ARBITRATION_SIGNAL, 1);
 			}
 		}
 	}
@@ -187,10 +379,9 @@ void gspEventThreadMain(void *arg)
 //essentially : get commandIndex and totalCommands, calculate offset of new command, copy command and update totalCommands
 //use LDREX/STREX because this data may also be accessed by the GSP module and we don't want to break stuff
 //(mostly, we could overwrite the buffer header with wrong data and make the GSP module reexecute old commands)
-Result gspSubmitGxCommand(u32* sharedGspCmdBuf, u32 gxCommand[0x8])
+Result gspSubmitGxCommand(u32 gxCommand[0x8])
 {
-	if(!sharedGspCmdBuf || !gxCommand)return -1;
-
+	u32* sharedGspCmdBuf = (u32*)((u8*)gspSharedMem + 0x800 + gspThreadId*0x200);
 	u32 cmdBufHeader = __ldrex((s32*)sharedGspCmdBuf);
 
 	u8 commandIndex=cmdBufHeader&0xFF;
@@ -370,6 +561,8 @@ Result GSPGPU_UnregisterInterruptRelayQueue(void)
 
 Result GSPGPU_AcquireRight(u8 flags)
 {
+	if(gspGpuRight) return 0;
+
 	u32* cmdbuf=getThreadCommandBuffer();
 	cmdbuf[0]=IPC_MakeHeader(0x16,1,2); // 0x160042
 	cmdbuf[1]=flags;
@@ -378,17 +571,21 @@ Result GSPGPU_AcquireRight(u8 flags)
 
 	Result ret=0;
 	if(R_FAILED(ret=svcSendSyncRequest(gspGpuHandle)))return ret;
+	if(R_SUCCEEDED(cmdbuf[1])) gspGpuRight=true;
 
 	return cmdbuf[1];
 }
 
 Result GSPGPU_ReleaseRight(void)
 {
+	if(!gspGpuRight) return 0;
+
 	u32* cmdbuf=getThreadCommandBuffer();
 	cmdbuf[0]=IPC_MakeHeader(0x17,0,0); // 0x170000
 
 	Result ret=0;
 	if(R_FAILED(ret=svcSendSyncRequest(gspGpuHandle)))return ret;
+	if(R_SUCCEEDED(cmdbuf[1])) gspGpuRight=false;
 
 	return cmdbuf[1];
 }
@@ -423,6 +620,17 @@ Result GSPGPU_RestoreVramSysArea(void)
 {
 	u32* cmdbuf=getThreadCommandBuffer();
 	cmdbuf[0]=IPC_MakeHeader(0x1A,0,0); // 0x1A0000
+
+	Result ret=0;
+	if(R_FAILED(ret=svcSendSyncRequest(gspGpuHandle)))return ret;
+
+	return cmdbuf[1];
+}
+
+Result GSPGPU_ResetGpuCore(void)
+{
+	u32* cmdbuf=getThreadCommandBuffer();
+	cmdbuf[0]=IPC_MakeHeader(0x1B,0,0); // 0x001B0000
 
 	Result ret=0;
 	if(R_FAILED(ret=svcSendSyncRequest(gspGpuHandle)))return ret;

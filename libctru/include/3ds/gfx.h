@@ -1,9 +1,14 @@
 /**
  * @file gfx.h
- * @brief LCD Screens manipulation
+ * @brief Simple framebuffer API
  *
- * This header provides functions to configure and manipulate the two screens, including double buffering and 3D activation.
+ * This API provides basic functionality needed to bring up framebuffers for both screens,
+ * as well as managing display mode (stereoscopic 3D) and double buffering.
  * It is mainly an abstraction over the gsp service.
+ *
+ * Please note that the 3DS uses *portrait* screens rotated 90 degrees counterclockwise.
+ * Width/height refer to the physical dimensions of the screen; that is, the top screen
+ * is 240 pixels wide and 400 pixels tall; while the bottom screen is 240x320.
  */
 #pragma once
 
@@ -16,36 +21,29 @@
 /// Converts packed RGB8 to packed RGB565.
 #define RGB8_to_565(r,g,b)  (((b)>>3)&0x1f)|((((g)>>2)&0x3f)<<5)|((((r)>>3)&0x1f)<<11)
 
-/// Available screens.
-typedef enum
-{
-	GFX_TOP = 0,   ///< Top screen
-	GFX_BOTTOM = 1 ///< Bottom screen
-}gfxScreen_t;
+/// Screen IDs.
+typedef enum {
+	GFX_TOP    = GSP_SCREEN_TOP,    ///< Top screen
+	GFX_BOTTOM = GSP_SCREEN_BOTTOM, ///< Bottom screen
+} gfxScreen_t;
 
 /**
- * @brief Side of top screen framebuffer.
+ * @brief Top screen framebuffer side.
  *
- * This is to be used only when the 3D is enabled.
- * Use only GFX_LEFT if this concerns the bottom screen or if 3D is disabled.
+ * This is only meaningful when stereoscopic 3D is enabled on the top screen.
+ * In any other case, use \ref GFX_LEFT.
  */
-typedef enum
-{
-	GFX_LEFT = 0, ///< Left eye framebuffer
-	GFX_RIGHT = 1,///< Right eye framebuffer
-}gfx3dSide_t;
+typedef enum {
+	GFX_LEFT  = 0, ///< Left eye framebuffer
+	GFX_RIGHT = 1, ///< Right eye framebuffer
+} gfx3dSide_t;
 
-
-///@name System related
+///@name Initialization and deinitialization
 ///@{
 
 /**
  * @brief Initializes the LCD framebuffers with default parameters
- *
- * By default ctrulib will configure the LCD framebuffers with the @ref GSP_BGR8_OES format in linear memory.
- * This is the same as calling : @code gfxInit(GSP_BGR8_OES,GSP_BGR8_OES,false); @endcode
- *
- * @note You should always call @ref gfxExit once done to free the memory and services
+ * This is equivalent to calling: @code gfxInit(GSP_BGR8_OES,GSP_BGR8_OES,false); @endcode
  */
 void gfxInitDefault(void);
 
@@ -55,117 +53,128 @@ void gfxInitDefault(void);
  * @param bottomFormat The format of the bottom screen framebuffers.
  * @param vramBuffers Whether to allocate the framebuffers in VRAM.
  *
- * This function will allocate the memory for the framebuffers and open a gsp service session.
- * It will also bind the newly allocated framebuffers to the LCD screen and setup the VBlank event.
+ * This function allocates memory for the framebuffers in the specified memory region.
+ * Initially, stereoscopic 3D is disabled and double buffering is enabled.
  *
- * The 3D stereoscopic display is will be disabled.
- *
- * @note Even if the double buffering is disabled, it will allocate two buffer per screen.
- * @note You should always call @ref gfxExit once done to free the memory and services
+ * @note This function internally calls \ref gspInit.
  */
-void gfxInit(GSPGPU_FramebufferFormats topFormat, GSPGPU_FramebufferFormats bottomFormat, bool vrambuffers);
+void gfxInit(GSPGPU_FramebufferFormat topFormat, GSPGPU_FramebufferFormat bottomFormat, bool vrambuffers);
 
 /**
- * @brief Closes the gsp service and frees the framebuffers.
- *
- * Just call it when you're done.
+ * @brief Deinitializes and frees the LCD framebuffers.
+ * @note This function internally calls \ref gspExit.
  */
 void gfxExit(void);
+
 ///@}
 
 ///@name Control
 ///@{
+
 /**
- * @brief Enables the 3D stereoscopic effect.
- * @param enable Enables the 3D effect if true, disables it if false.
+ * @brief Enables or disables the 3D stereoscopic effect on the top screen.
+ * @param enable Pass true to enable, false to disable.
+ * @note Stereoscopic 3D is disabled by default.
  */
 void gfxSet3D(bool enable);
 
 /**
- * @brief Retrieves the status of the 3D stereoscopic effect.
+ * @brief Retrieves the status of the 3D stereoscopic effect on the top screen.
  * @return true if 3D enabled, false otherwise.
  */
 bool gfxIs3D(void);
 
 /**
- * @brief Changes the color format of a screen
- * @param screen The screen of which format should be changed
- * @param format One of the gsp pixel formats.
+ * @brief Retrieves the status of the 800px (double-height) high resolution display mode of the top screen.
+ * @return true if wide mode enabled, false otherwise.
  */
-void gfxSetScreenFormat(gfxScreen_t screen, GSPGPU_FramebufferFormats format);
+bool gfxIsWide(void);
 
 /**
- * @brief Gets a screen pixel format.
- * @param screen Screen to get the pixel format of.
- * @return the pixel format of the chosen screen set by ctrulib.
+ * @brief Enables or disables the 800px (double-height) high resolution display mode of the top screen.
+ * @param enable Pass true to enable, false to disable.
+ * @note Wide mode is disabled by default.
+ * @note Wide and stereoscopic 3D modes are mutually exclusive.
+ * @note In wide mode pixels are not square, since scanlines are half as tall as they normally are.
+ * @warning Wide mode does not work on Old 2DS consoles (however it does work on New 2DS XL consoles).
  */
-GSPGPU_FramebufferFormats gfxGetScreenFormat(gfxScreen_t screen);
+void gfxSetWide(bool enable);
 
 /**
- * @brief Sets whether to use ctrulib's double buffering
- * @param screen Screen to toggle double buffering for.
- * @param doubleBuffering Whether to use double buffering.
- *
- * ctrulib is by default using a double buffering scheme.
- * If you do not want to swap one of the screen framebuffers when @ref gfxSwapBuffers or @ref gfxSwapBuffers is called,
- * then you have to disable double buffering.
- *
- * It is however recommended to call @ref gfxSwapBuffers even if double buffering is disabled
- * for both screens if you want to keep the gsp configuration up to date.
+ * @brief Changes the pixel format of a screen.
+ * @param screen Screen ID (see \ref gfxScreen_t)
+ * @param format Pixel format (see \ref GSPGPU_FramebufferFormat)
+ * @note If the currently allocated framebuffers are too small for the specified format,
+ *       they are freed and new ones are reallocated.
  */
-void gfxSetDoubleBuffering(gfxScreen_t screen, bool doubleBuffering);
+void gfxSetScreenFormat(gfxScreen_t screen, GSPGPU_FramebufferFormat format);
 
 /**
- * @brief Flushes the current framebuffers
+ * @brief Retrieves the current pixel format of a screen.
+ * @param screen Screen ID (see \ref gfxScreen_t)
+ * @return Pixel format (see \ref GSPGPU_FramebufferFormat)
+ */
+GSPGPU_FramebufferFormat gfxGetScreenFormat(gfxScreen_t screen);
+
+/**
+ * @brief Enables or disables double buffering on a screen.
+ * @param screen Screen ID (see \ref gfxScreen_t)
+ * @param enable Pass true to enable, false to disable.
+ * @note Double buffering is enabled by default.
+ */
+void gfxSetDoubleBuffering(gfxScreen_t screen, bool enable);
+
+///@}
+
+///@name Rendering and presentation
+///@{
+
+/**
+ * @brief Retrieves the framebuffer of the specified screen to which graphics should be rendered.
+ * @param screen Screen ID (see \ref gfxScreen_t)
+ * @param side Framebuffer side (see \ref gfx3dSide_t) (pass \ref GFX_LEFT if not using stereoscopic 3D)
+ * @param width Pointer that will hold the width of the framebuffer in pixels.
+ * @param height Pointer that will hold the height of the framebuffer in pixels.
+ * @return A pointer to the current framebuffer of the chosen screen.
  *
- * Use this if the data within your framebuffers changes a lot and that you want to make sure everything was updated correctly.
- * This shouldn't be needed and has a significant overhead.
+ * Please remember that the returned pointer will change every frame if double buffering is enabled.
+ */
+u8* gfxGetFramebuffer(gfxScreen_t screen, gfx3dSide_t side, u16* width, u16* height);
+
+/**
+ * @brief Flushes the data cache for the current framebuffers.
+ * @warning This is **only used during software rendering**. Since this function has significant overhead,
+ *          it is preferred to call this only once per frame, after all software rendering is completed.
  */
 void gfxFlushBuffers(void);
 
 /**
- * @brief Updates the configuration of the specified screen (swapping the buffers if double-buffering is enabled).
- * @param scr Screen to configure.
- * @param immediate Whether to apply the updated configuration immediately or let GSPGPU apply it after the next GX transfer completes.
+ * @brief Updates the configuration of the specified screen, swapping the buffers if double buffering is enabled.
+ * @param scr Screen ID (see \ref gfxScreen_t)
+ * @param hasStereo For the top screen in 3D mode: true if the framebuffer contains individual images
+ *                  for both eyes, or false if the left image should be duplicated to the right eye.
+ * @note Previously rendered content will be displayed on the screen after the next VBlank.
+ * @note This function is still useful even if double buffering is disabled, as it must be used to commit configuration changes.
+ * @warning Only call this once per screen per frame, otherwise graphical glitches will occur
+ *          since this API does not implement triple buffering.
  */
-void gfxConfigScreen(gfxScreen_t scr, bool immediate);
+void gfxScreenSwapBuffers(gfxScreen_t scr, bool hasStereo);
 
 /**
- * @brief Swaps the buffers and sets the gsp state
- *
- * This is to be called to update the gsp state and swap the framebuffers.
- * LCD rendering should start as soon as the gsp state is set.
- * When using the GPU, call @ref gfxSwapBuffers instead.
+ * @brief Same as \ref gfxScreenSwapBuffers, but with hasStereo set to true.
+ * @param scr Screen ID (see \ref gfxScreen_t)
+ * @param immediate This parameter no longer has any effect and is thus ignored.
+ * @deprecated This function has been superseded by \ref gfxScreenSwapBuffers, please use that instead.
+ */
+DEPRECATED void gfxConfigScreen(gfxScreen_t scr, bool immediate);
+
+/**
+ * @brief Updates the configuration of both screens.
+ * @note This function is equivalent to: \code gfxScreenSwapBuffers(GFX_TOP,true); gfxScreenSwapBuffers(GFX_BOTTOM,true); \endcode
  */
 void gfxSwapBuffers(void);
 
-/**
- * @brief Swaps the framebuffers
- *
- * This is the version to be used with the GPU since the GPU will use the gsp shared memory,
- * so the gsp state mustn't be set directly by the user.
- */
+/// Same as \ref gfxSwapBuffers (formerly different).
 void gfxSwapBuffersGpu(void);
 
 ///@}
-
-
-///@name Helper
-///@{
-/**
- * @brief Retrieves a framebuffer information.
- * @param screen Screen to retrieve framebuffer information for.
- * @param side Side of the screen to retrieve framebuffer information for.
- * @param width Pointer that will hold the width of the framebuffer in pixels.
- * @param height Pointer that will hold the height of the framebuffer in pixels.
- * @return A pointer to the current framebuffer of the choosen screen.
- *
- * Please remember that the returned pointer will change after each call to gfxSwapBuffers if double buffering is enabled.
- */
-u8* gfxGetFramebuffer(gfxScreen_t screen, gfx3dSide_t side, u16* width, u16* height);
-///@}
-
-//global variables
-extern u8* gfxTopLeftFramebuffers[2];
-extern u8* gfxTopRightFramebuffers[2];
-extern u8* gfxBottomFramebuffers[2];

@@ -13,7 +13,7 @@
 
 /**
  * @brief Supported transfer pixel formats.
- * @sa GSPGPU_FramebufferFormats
+ * @sa GSPGPU_FramebufferFormat
  */
 typedef enum
 {
@@ -64,8 +64,6 @@ typedef enum
 #define GX_CMDLIST_UPDATE_GAS_ACC BIT(0)
 /// Flushes the command list.
 #define GX_CMDLIST_FLUSH          BIT(1)
-
-extern u32* gxCmdBuf; ///< GX command buffer.
 
 /// GX command entry
 typedef union

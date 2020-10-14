@@ -16,8 +16,12 @@
 #include <3ds/util/utf.h>
 #include <3ds/env.h>
 
+#include "path_buf.h"
+
 typedef struct romfs_mount
 {
+	devoptab_t         device;
+	char               name[32];
 	Handle             fd;
 	time_t             mtime;
 	u32                offset;
@@ -30,9 +34,6 @@ typedef struct romfs_mount
 
 extern int __system_argc;
 extern char** __system_argv;
-
-static char __component[PATH_MAX+1];
-static uint16_t __utf16path[PATH_MAX+1];
 
 #define romFS_root(m)   ((romfs_dir*)(m)->dirTable)
 #define romFS_dir(m,x)  ((romfs_dir*) ((u8*)(m)->dirTable  + (x)))
@@ -85,9 +86,8 @@ typedef struct
 	u32        childFile;
 } romfs_diriter;
 
-static devoptab_t romFS_devoptab =
+static const devoptab_t romFS_devoptab =
 {
-	.name         = "romfs",
 	.structSize   = sizeof(romfs_fileobj),
 	.open_r       = romfs_open,
 	.close_r      = romfs_close,
@@ -95,13 +95,13 @@ static devoptab_t romFS_devoptab =
 	.seek_r       = romfs_seek,
 	.fstat_r      = romfs_fstat,
 	.stat_r       = romfs_stat,
+	.lstat_r      = romfs_stat,
 	.chdir_r      = romfs_chdir,
 	.dirStateSize = sizeof(romfs_diriter),
 	.diropen_r    = romfs_diropen,
 	.dirreset_r   = romfs_dirreset,
 	.dirnext_r    = romfs_dirnext,
 	.dirclose_r   = romfs_dirclose,
-	.deviceData   = 0,
 };
 
 //-----------------------------------------------------------------------------
@@ -123,9 +123,6 @@ typedef struct
 	// offset to filesystem
 	u32 fsOffset;
 } _3DSX_Header;
-
-static Result romfsMountCommon(romfs_mount *mount);
-static void   romfsInitMtime(romfs_mount *mount, FS_ArchiveID archId, FS_Path archPath, FS_Path filePath);
 
 __attribute__((weak)) const char* __romfs_path = NULL;
 
@@ -151,16 +148,23 @@ static void romfs_remove(romfs_mount *mount)
 
 static romfs_mount* romfs_alloc(void)
 {
-	romfs_mount *mount = (romfs_mount*)calloc(1, sizeof(romfs_mount));
+	romfs_mount *mount = (romfs_mount*)malloc(sizeof(romfs_mount));
 
-	if(mount)
+	if (mount)
+	{
+		memset(mount, 0, sizeof(*mount));
+		memcpy(&mount->device, &romFS_devoptab, sizeof(romFS_devoptab));
+		mount->device.name = mount->name;
+		mount->device.deviceData = mount;
 		romfs_insert(mount);
+	}
 
 	return mount;
 }
 
 static void romfs_free(romfs_mount *mount)
 {
+	FSFILE_Close(mount->fd);
 	romfs_remove(mount);
 	free(mount->fileTable);
 	free(mount->fileHashTable);
@@ -169,222 +173,182 @@ static void romfs_free(romfs_mount *mount)
 	free(mount);
 }
 
-Result romfsMount(struct romfs_mount **p)
+Result romfsMountFromFile(Handle fd, u32 offset, const char *name)
 {
 	romfs_mount *mount = romfs_alloc();
-	if(mount == NULL)
-		return 99;
-
-	if (envIsHomebrew())
+	if (mount == NULL)
 	{
-		// RomFS appended to a 3DSX file
-		const char* filename = __romfs_path;
-		if (__system_argc > 0 && __system_argv[0])
-			filename = __system_argv[0];
-		if (!filename)
-		{
-			romfs_free(mount);
-			return 1;
-		}
-
-		if (strncmp(filename, "sdmc:/", 6) == 0)
-			filename += 5;
-		else if (strncmp(filename, "3dslink:/", 9) == 0)
-		{
-			strncpy(__component, "/3ds",     PATH_MAX);
-			strncat(__component, filename+8, PATH_MAX);
-			__component[PATH_MAX] = 0;
-			filename = __component;
-		}
-		else
-		{
-			romfs_free(mount);
-			return 2;
-		}
-
-		ssize_t units = utf8_to_utf16(__utf16path, (const uint8_t*)filename, PATH_MAX);
-		if (units < 0)
-		{
-			romfs_free(mount);
-			return 3;
-		}
-		if (units >= PATH_MAX)
-		{
-			romfs_free(mount);
-			return 4;
-		}
-		__utf16path[units] = 0;
-
-		FS_Path archPath = { PATH_EMPTY, 1, (u8*)"" };
-		FS_Path filePath = { PATH_UTF16, (units+1)*2, (u8*)__utf16path };
-
-		Result rc = FSUSER_OpenFileDirectly(&mount->fd, ARCHIVE_SDMC, archPath, filePath, FS_OPEN_READ, 0);
-		if (R_FAILED(rc))
-		{
-			romfs_free(mount);
-			return rc;
-		}
-
-		romfsInitMtime(mount, ARCHIVE_SDMC, archPath, filePath);
-
-		_3DSX_Header hdr;
-		if (!_romfs_read_chk(mount, 0, &hdr, sizeof(hdr))) goto _fail0;
-		if (hdr.magic != _3DSX_MAGIC) goto _fail0;
-		if (hdr.headerSize < sizeof(hdr)) goto _fail0;
-		mount->offset = hdr.fsOffset;
-		if (!mount->offset) goto _fail0;
-	}
-	else
-	{
-		// Regular RomFS
-		u8 zeros[0xC];
-		memset(zeros, 0, sizeof(zeros));
-
-		FS_Path archPath = { PATH_EMPTY, 1, (u8*)"" };
-		FS_Path filePath = { PATH_BINARY, sizeof(zeros), zeros };
-
-		Result rc = FSUSER_OpenFileDirectly(&mount->fd, ARCHIVE_ROMFS, archPath, filePath, FS_OPEN_READ, 0);
-		if (R_FAILED(rc))
-		{
-			romfs_free(mount);
-			return rc;
-		}
-
-		romfsInitMtime(mount, ARCHIVE_ROMFS, archPath, filePath);
+		FSFILE_Close(fd);
+		return MAKERESULT(RL_FATAL, RS_OUTOFRESOURCE, RM_ROMFS, RD_OUT_OF_MEMORY);
 	}
 
-	Result ret = romfsMountCommon(mount);
-	if(R_SUCCEEDED(ret) && p)
-		*p = mount;
-
-	return ret;
-
-_fail0:
-	FSFILE_Close(mount->fd);
-	romfs_free(mount);
-	return 10;
-}
-
-Result romfsMountFromFile(Handle file, u32 offset, struct romfs_mount **p)
-{
-	romfs_mount *mount = romfs_alloc();
-	if(mount == NULL)
-		return 99;
-
-	mount->fd     = file;
+	mount->fd     = fd;
 	mount->offset = offset;
+	mount->mtime  = time(NULL);
+	strncpy(mount->name, name, sizeof(mount->name)-1);
 
-	Result ret = romfsMountCommon(mount);
-	if(R_SUCCEEDED(ret) && p)
-		*p = mount;
-
-	return ret;
-}
-
-Result romfsMountCommon(romfs_mount *mount)
-{
 	if (_romfs_read(mount, 0, &mount->header, sizeof(mount->header)) != sizeof(mount->header))
-		goto fail;
+		goto fail_io;
 
 	mount->dirHashTable = (u32*)malloc(mount->header.dirHashTableSize);
 	if (!mount->dirHashTable)
-		goto fail;
+		goto fail_oom;
 	if (!_romfs_read_chk(mount, mount->header.dirHashTableOff, mount->dirHashTable, mount->header.dirHashTableSize))
-		goto fail;
+		goto fail_io;
 
 	mount->dirTable = malloc(mount->header.dirTableSize);
 	if (!mount->dirTable)
-		goto fail;
+		goto fail_oom;
 	if (!_romfs_read_chk(mount, mount->header.dirTableOff, mount->dirTable, mount->header.dirTableSize))
-		goto fail;
+		goto fail_io;
 
 	mount->fileHashTable = (u32*)malloc(mount->header.fileHashTableSize);
 	if (!mount->fileHashTable)
-		goto fail;
+		goto fail_oom;
 	if (!_romfs_read_chk(mount, mount->header.fileHashTableOff, mount->fileHashTable, mount->header.fileHashTableSize))
-		goto fail;
+		goto fail_io;
 
 	mount->fileTable = malloc(mount->header.fileTableSize);
 	if (!mount->fileTable)
-		goto fail;
+		goto fail_oom;
 	if (!_romfs_read_chk(mount, mount->header.fileTableOff, mount->fileTable, mount->header.fileTableSize))
-		goto fail;
+		goto fail_io;
 
 	mount->cwd = romFS_root(mount);
 
-	// add device if this is the first one
-	if(mount->next == NULL && AddDevice(&romFS_devoptab) < 0)
-		goto fail;
+	if (AddDevice(&mount->device) < 0)
+		goto fail_oom;
 
 	return 0;
 
-fail:
-	FSFILE_Close(mount->fd);
+fail_oom:
 	romfs_free(mount);
-	return 10;
+	return MAKERESULT(RL_FATAL, RS_OUTOFRESOURCE, RM_ROMFS, RD_OUT_OF_MEMORY);
+
+fail_io:
+	romfs_free(mount);
+	return MAKERESULT(RL_FATAL, RS_INVALIDSTATE, RM_ROMFS, RD_NOT_FOUND);
 }
 
-static void romfsInitMtime(romfs_mount *mount, FS_ArchiveID archId, FS_Path archPath, FS_Path filePath)
+Result romfsMountSelf(const char* name)
 {
-	u64 mtime;
-	FS_Archive arch;
-	Result rc;
+	// If we are not 3DSX, we need to mount this process' real RomFS
+	if (!envIsHomebrew())
+		return romfsMountFromCurrentProcess(name);
 
-	mount->mtime = time(NULL);
-	rc = FSUSER_OpenArchive(&arch, archId, archPath);
-	if (R_FAILED(rc))
-		return;
+	// Otherwise, we use the embedded RomFS inside the 3DSX file
+    // Retrieve the filename of our 3DSX file
+	const char* filename = __romfs_path;
+	if (__system_argc > 0 && __system_argv[0])
+		filename = __system_argv[0];
+	if (!filename)
+		return MAKERESULT(RL_USAGE, RS_INVALIDARG, RM_ROMFS, RD_NO_DATA);
 
-	rc = FSUSER_ControlArchive(arch, ARCHIVE_ACTION_GET_TIMESTAMP,
-	                           (void*)filePath.data, filePath.size,
-	                           &mtime, sizeof(mtime));
-	FSUSER_CloseArchive(arch);
-	if (R_FAILED(rc))
-		return;
-
-	/* convert from milliseconds to seconds */
-	mtime /= 1000;
-	/* convert from 2000-based timestamp to UNIX timestamp */
-	mtime += 946684800;
-	mount->mtime = mtime;
-}
-
-Result romfsBind(struct romfs_mount *mount)
-{
-	for(romfs_mount **it = &romfs_mount_list; *it; it = &(*it)->next)
+	// Adjust the path name
+	if (strncmp(filename, "sdmc:/", 6) == 0)
+		filename += 5;
+	else if (strncmp(filename, "3dslink:/", 9) == 0)
 	{
-		if(*it == mount)
-		{
-			*it = mount->next;
-			romfs_insert(mount);
-			return 0;
-		}
-	}
-
-	return 99;
-}
-
-Result romfsUnmount(struct romfs_mount *mount)
-{
-	if(mount)
-	{
-		// unmount specific
-		FSFILE_Close(mount->fd);
-		romfs_free(mount);
+		strncpy(__ctru_dev_path_buf, "/3ds",     PATH_MAX);
+		strncat(__ctru_dev_path_buf, filename+8, PATH_MAX);
+		__ctru_dev_path_buf[PATH_MAX] = 0;
+		filename = __ctru_dev_path_buf;
 	}
 	else
+		return MAKERESULT(RL_USAGE, RS_NOTSUPPORTED, RM_ROMFS, RD_NOT_IMPLEMENTED);
+
+	// Convert the path to UTF-16
+	ssize_t units = utf8_to_utf16(__ctru_dev_utf16_buf, (const uint8_t*)filename, PATH_MAX);
+	if (units < 0 || units > PATH_MAX)
+		return MAKERESULT(RL_USAGE, RS_INVALIDARG, RM_ROMFS, RD_OUT_OF_RANGE);
+	__ctru_dev_utf16_buf[units] = 0;
+
+	// Open the file directly
+	Handle fd = 0;
+	FS_Path archPath = { PATH_EMPTY, 1, "" };
+	FS_Path filePath = { PATH_UTF16, (units+1)*2, __ctru_dev_utf16_buf };
+	Result rc = FSUSER_OpenFileDirectly(&fd, ARCHIVE_SDMC, archPath, filePath, FS_OPEN_READ, 0);
+	if (R_FAILED(rc))
+		return rc;
+
+	// Read and parse the header
+	_3DSX_Header hdr;
+	u32 bytesRead = 0;
+	rc = FSFILE_Read(fd, &bytesRead, 0, &hdr, sizeof(hdr));
+	if (R_FAILED(rc))
 	{
-		// unmount everything
-		while(romfs_mount_list)
-		{
-			FSFILE_Close(romfs_mount_list->fd);
-			romfs_free(romfs_mount_list);
-		}
+		FSFILE_Close(fd);
+		return rc;
 	}
 
-	// if no more mounts, remove device
-	if(romfs_mount_list == NULL)
-		RemoveDevice("romfs:");
+	// Validate the 3DSX header
+	if (bytesRead != sizeof(hdr) || hdr.magic != _3DSX_MAGIC || hdr.headerSize < sizeof(hdr))
+	{
+		FSFILE_Close(fd);
+		return MAKERESULT(RL_FATAL, RS_NOTFOUND, RM_ROMFS, RD_NOT_FOUND);
+	}
+
+	// Mount the file
+	return romfsMountFromFile(fd, hdr.fsOffset, name);
+}
+
+Result romfsMountFromCurrentProcess(const char *name)
+{
+	// Set up FS_Path structures
+	u8 zeros[0xC] = {0};
+	FS_Path archPath = { PATH_EMPTY, 1, "" };
+	FS_Path filePath = { PATH_BINARY, sizeof(zeros), zeros };
+
+	// Open the RomFS file and mount it
+	Handle fd = 0;
+	Result rc = FSUSER_OpenFileDirectly(&fd, ARCHIVE_ROMFS, archPath, filePath, FS_OPEN_READ, 0);
+	if (R_SUCCEEDED(rc))
+		rc = romfsMountFromFile(fd, 0, name);
+
+	return rc;
+}
+
+Result romfsMountFromTitle(u64 tid, FS_MediaType mediatype, const char* name)
+{
+	// Set up FS_Path structures
+	u32 archPathData[4] = { (u32)tid, (u32)(tid>>32), (u8)mediatype, 0 };
+	u32 filePathData[5] = { 0 };
+	FS_Path archPath = { PATH_BINARY, sizeof(archPathData), archPathData };
+	FS_Path filePath = { PATH_BINARY, sizeof(filePathData), filePathData };
+
+	// Open the RomFS file and mount it
+	Handle fd = 0;
+	Result rc = FSUSER_OpenFileDirectly(&fd, ARCHIVE_SAVEDATA_AND_CONTENT, archPath, filePath, FS_OPEN_READ, 0);
+	if (R_SUCCEEDED(rc))
+		rc = romfsMountFromFile(fd, 0, name);
+
+	return rc;
+}
+
+Result romfsUnmount(const char* name)
+{
+	// Find the mount
+	romfs_mount* mount = romfs_mount_list;
+	while (mount)
+	{
+		if (strncmp(mount->name, name, sizeof(mount->name)) == 0)
+			break;
+		mount = mount->next;
+	}
+
+	if (mount == NULL)
+		return MAKERESULT(RL_STATUS, RS_NOTFOUND, RM_ROMFS, RD_NOT_FOUND);
+
+	// Remove device
+	char tmpname[34];
+	unsigned len = strlen(name);
+	memcpy(tmpname, mount->name, len);
+	tmpname[len] = ':';
+	tmpname[len+1] = 0;
+	RemoveDevice(tmpname);
+
+	// Free the mount
+	romfs_free(mount);
 
 	return 0;
 }
@@ -456,7 +420,7 @@ static int navigateToDir(romfs_mount *mount, romfs_dir** ppDir, const char** pPa
 	while (**pPath)
 	{
 		char* slashPos = strchr(*pPath, '/');
-		char* component = __component;
+		char* component = __ctru_dev_path_buf;
 
 		if (slashPos)
 		{
@@ -486,19 +450,16 @@ static int navigateToDir(romfs_mount *mount, romfs_dir** ppDir, const char** pPa
 			}
 		}
 
-		units = utf8_to_utf16(__utf16path, (const uint8_t*)component, PATH_MAX);
+		units = utf8_to_utf16(__ctru_dev_utf16_buf, (const uint8_t*)component, PATH_MAX);
 		if (units < 0)
 			return EILSEQ;
-		if (units >= PATH_MAX)
+		if (units > PATH_MAX)
 			return ENAMETOOLONG;
 
-		*ppDir = searchForDir(mount, *ppDir, __utf16path, units);
+		*ppDir = searchForDir(mount, *ppDir, __ctru_dev_utf16_buf, units);
 		if (!*ppDir)
-			return EEXIST;
+			return ENOENT;
 	}
-
-	if (!isDir && !**pPath)
-		return EILSEQ;
 
 	return 0;
 }
@@ -541,13 +502,37 @@ static ino_t file_inode(romfs_mount *mount, romfs_file *file)
 	return ((uint32_t*)file - (uint32_t*)mount->fileTable) + mount->header.dirTableSize/4;
 }
 
+static void fill_dir(struct stat *st, romfs_mount *mount, romfs_dir *dir)
+{
+	memset(st, 0, sizeof(*st));
+	st->st_ino     = dir_inode(mount, dir);
+	st->st_mode    = romFS_dir_mode;
+	st->st_nlink   = dir_nlink(mount, dir);
+	st->st_size    = dir_size(dir);
+	st->st_blksize = 512;
+	st->st_blocks  = (st->st_blksize + 511) / 512;
+	st->st_atime   = st->st_mtime = st->st_ctime = mount->mtime;
+}
+
+static void fill_file(struct stat *st, romfs_mount *mount, romfs_file *file)
+{
+	memset(st, 0, sizeof(*st));
+	st->st_ino     = file_inode(mount, file);
+	st->st_mode    = romFS_file_mode;
+	st->st_nlink   = 1;
+	st->st_size    = (off_t)file->dataSize;
+	st->st_blksize = 512;
+	st->st_blocks  = (st->st_blksize + 511) / 512;
+	st->st_atime   = st->st_mtime = st->st_ctime = mount->mtime;
+}
+
 //-----------------------------------------------------------------------------
 
 int romfs_open(struct _reent *r, void *fileStruct, const char *path, int flags, int mode)
 {
 	romfs_fileobj* fileobj = (romfs_fileobj*)fileStruct;
 
-	fileobj->mount = romfs_mount_list;
+	fileobj->mount = (romfs_mount*)r->deviceData;
 
 	if ((flags & O_ACCMODE) != O_RDONLY)
 	{
@@ -560,7 +545,7 @@ int romfs_open(struct _reent *r, void *fileStruct, const char *path, int flags, 
 	if (r->_errno != 0)
 		return -1;
 
-	ssize_t units = utf8_to_utf16(__utf16path, (const uint8_t*)path, PATH_MAX);
+	ssize_t units = utf8_to_utf16(__ctru_dev_utf16_buf, (const uint8_t*)path, PATH_MAX);
 	if (units <= 0)
 	{
 		r->_errno = EILSEQ;
@@ -572,7 +557,7 @@ int romfs_open(struct _reent *r, void *fileStruct, const char *path, int flags, 
 		return -1;
 	}
 
-	romfs_file* file = searchForFile(fileobj->mount, curDir, __utf16path, units);
+	romfs_file* file = searchForFile(fileobj->mount, curDir, __ctru_dev_utf16_buf, units);
 	if (!file)
 	{
 		if(flags & O_CREAT)
@@ -669,76 +654,58 @@ off_t romfs_seek(struct _reent *r, void *fd, off_t pos, int dir)
 
 int romfs_fstat(struct _reent *r, void *fd, struct stat *st)
 {
-	romfs_fileobj* file = (romfs_fileobj*)fd;
-	memset(st, 0, sizeof(struct stat));
-	st->st_ino   = file_inode(file->mount, file->file);
-	st->st_mode  = romFS_file_mode;
-	st->st_nlink = 1;
-	st->st_size  = (off_t)file->file->dataSize;
-	st->st_blksize = 512;
-	st->st_blocks  = (st->st_blksize + 511) / 512;
-	st->st_atime = st->st_mtime = st->st_ctime = file->mount->mtime;
-
+	romfs_fileobj* fileobj = (romfs_fileobj*)fd;
+	fill_file(st, fileobj->mount, fileobj->file);
 	return 0;
 }
 
 int romfs_stat(struct _reent *r, const char *path, struct stat *st)
 {
-	romfs_mount* mount = romfs_mount_list;
+	romfs_mount* mount = (romfs_mount*)r->deviceData;
 	romfs_dir* curDir = NULL;
 	r->_errno = navigateToDir(mount, &curDir, &path, false);
 	if(r->_errno != 0)
 		return -1;
 
-	ssize_t units = utf8_to_utf16(__utf16path, (const uint8_t*)path, PATH_MAX);
+	if (!*path)
+	{
+		fill_dir(st, mount, curDir);
+		return 0;
+	}
+
+	ssize_t units = utf8_to_utf16(__ctru_dev_utf16_buf, (const uint8_t*)path, PATH_MAX);
 	if (units <= 0)
 	{
 		r->_errno = EILSEQ;
 		return -1;
 	}
-	if (units >= PATH_MAX)
+	if (units > PATH_MAX)
 	{
 		r->_errno = ENAMETOOLONG;
 		return -1;
 	}
 
-	romfs_dir* dir = searchForDir(mount, curDir, __utf16path, units);
+	romfs_dir* dir = searchForDir(mount, curDir, __ctru_dev_utf16_buf, units);
 	if(dir)
 	{
-		memset(st, 0, sizeof(*st));
-		st->st_ino     = dir_inode(mount, dir);
-		st->st_mode    = romFS_dir_mode;
-		st->st_nlink   = dir_nlink(mount, dir);
-		st->st_size    = dir_size(dir);
-		st->st_blksize = 512;
-		st->st_blocks  = (st->st_blksize + 511) / 512;
-		st->st_atime = st->st_mtime = st->st_ctime = mount->mtime;
-
+		fill_dir(st, mount, dir);
 		return 0;
 	}
 
-	romfs_file* file = searchForFile(mount, curDir, __utf16path, units);
+	romfs_file* file = searchForFile(mount, curDir, __ctru_dev_utf16_buf, units);
 	if(file)
 	{
-		memset(st, 0, sizeof(*st));
-		st->st_ino   = file_inode(mount, file);
-		st->st_mode  = romFS_file_mode;
-		st->st_nlink = 1;
-		st->st_size  = file->dataSize;
-		st->st_blksize = 512;
-		st->st_blocks  = (st->st_blksize + 511) / 512;
-		st->st_atime = st->st_mtime = st->st_ctime = mount->mtime;
-
+		fill_file(st, mount, file);
 		return 0;
 	}
 
 	r->_errno = ENOENT;
-	return 1;
+	return -1;
 }
 
 int romfs_chdir(struct _reent *r, const char *path)
 {
-	romfs_mount* mount = romfs_mount_list;
+	romfs_mount* mount = (romfs_mount*)r->deviceData;
 	romfs_dir* curDir = NULL;
 	r->_errno = navigateToDir(mount, &curDir, &path, true);
 	if (r->_errno != 0)
@@ -752,7 +719,7 @@ DIR_ITER* romfs_diropen(struct _reent *r, DIR_ITER *dirState, const char *path)
 {
 	romfs_diriter* iter = (romfs_diriter*)(dirState->dirStruct);
 	romfs_dir* curDir = NULL;
-	iter->mount = romfs_mount_list;
+	iter->mount = (romfs_mount*)r->deviceData;
 
 	r->_errno = navigateToDir(iter->mount, &curDir, &path, true);
 	if(r->_errno != 0)
@@ -818,9 +785,9 @@ int romfs_dirnext(struct _reent *r, DIR_ITER *dirState, char *filename, struct s
 
 		/* convert name from UTF-16 to UTF-8 */
 		memset(filename, 0, NAME_MAX);
-		memcpy(__utf16path, dir->name, dir->nameLen*sizeof(uint16_t));
-		__utf16path[dir->nameLen/sizeof(uint16_t)] = 0;
-		units = utf16_to_utf8((uint8_t*)filename, __utf16path, NAME_MAX);
+		memcpy(__ctru_dev_utf16_buf, dir->name, dir->nameLen*sizeof(uint16_t));
+		__ctru_dev_utf16_buf[dir->nameLen/sizeof(uint16_t)] = 0;
+		units = utf16_to_utf8((uint8_t*)filename, __ctru_dev_utf16_buf, NAME_MAX);
 
 		if(units < 0)
 		{
@@ -849,9 +816,9 @@ int romfs_dirnext(struct _reent *r, DIR_ITER *dirState, char *filename, struct s
 
 		/* convert name from UTF-16 to UTF-8 */
 		memset(filename, 0, NAME_MAX);
-		memcpy(__utf16path, file->name, file->nameLen*sizeof(uint16_t));
-		__utf16path[file->nameLen/sizeof(uint16_t)] = 0;
-		units = utf16_to_utf8((uint8_t*)filename, __utf16path, NAME_MAX);
+		memcpy(__ctru_dev_utf16_buf, file->name, file->nameLen*sizeof(uint16_t));
+		__ctru_dev_utf16_buf[file->nameLen/sizeof(uint16_t)] = 0;
+		units = utf16_to_utf8((uint8_t*)filename, __ctru_dev_utf16_buf, NAME_MAX);
 
 		if(units < 0)
 		{

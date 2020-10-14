@@ -1,9 +1,13 @@
 # libctru - CTR User Library
 
+[![Build Status](https://travis-ci.org/devkitPro/libctru.svg?branch=master)](https://travis-ci.org/devkitPro/libctru)
+
 Library for writing user mode ARM11 code for the 3DS (CTR)
 
 This library aims to provide the foundations necessary to write 3DS Homebrew, and straightforwardly access the different functionalities provided by the 3DS operating system.
 It is not meant to provide higher level functions; to put things in perspective, the purpose of libctru would be to sit between the OS and a possible port of SDL rather than replace it.
+
+*(Originally located at github.com/smealum/ctrulib)*
 
 # Setup
 
@@ -15,7 +19,7 @@ You may find instructions on how to install devkitARM on [the devkitPro Wiki](ht
 
 # Documentation
 
-The documentation is automatically built upon release and can be found at the following url: [http://smealum.github.io/ctrulib](http://smealum.github.io/ctrulib)
+The documentation is automatically built upon release and can be found at the following url: https://devkitpro.github.io/libctru/
 
 # License
 

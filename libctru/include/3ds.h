@@ -40,6 +40,7 @@ extern "C" {
 #include <3ds/services/csnd.h>
 #include <3ds/services/dsp.h>
 #include <3ds/services/fs.h>
+#include <3ds/services/fspxi.h>
 #include <3ds/services/fsreg.h>
 #include <3ds/services/frd.h>
 #include <3ds/services/gspgpu.h>
@@ -71,7 +72,6 @@ extern "C" {
 #include <3ds/services/loader.h>
 #include <3ds/services/y2r.h>
 #include <3ds/services/mcuhwc.h>
-#include <3ds/services/hb.h>
 
 #include <3ds/gpu/gx.h>
 #include <3ds/gpu/gpu.h>
@@ -86,7 +86,7 @@ extern "C" {
 
 #include <3ds/applets/miiselector.h>
 
-#include <3ds/sdmc.h>
+#include <3ds/archive.h>
 #include <3ds/romfs.h>
 #include <3ds/font.h>
 #include <3ds/mii.h>
@@ -142,4 +142,3 @@ extern "C" {
  * @example threads/thread-basic/source/main.c
  * @example time/rtc/source/main.c
  */
-

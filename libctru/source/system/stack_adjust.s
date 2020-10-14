@@ -1,11 +1,6 @@
+#include <3ds/asminc.h>
 
-	.arm
-	.align 2
-
-	.global	initSystem
-	.type	initSystem,	%function
-
-initSystem:
+BEGIN_ASM_FUNC initSystem, weak
 	ldr	r2, =saved_stack
 	str	sp, [r2]
 	str	lr, [r2,#4]
@@ -22,36 +17,30 @@ initSystem:
 	bics	sp, sp, #7
 	str	sp, [r2]
 
-
 	bl	__appInit
 	bl	__libc_init_array
 
 	ldr	r2, =saved_stack
 	ldr	lr, [r2,#4]
  	bx	lr
+END_ASM_FUNC
 
-
-	.global	__ctru_exit
-	.type	__ctru_exit,	%function
-
-__ctru_exit:
+BEGIN_ASM_FUNC __ctru_exit, weak
 	bl	__libc_fini_array
 	bl	__appExit
 
 	ldr	r2, =saved_stack
 	ldr	sp, [r2]
 	b	__libctru_exit
+END_ASM_FUNC
 
-	.data
+	.section .data.__stacksize__, "aw"
 	.align 2
 __stacksize__:
 	.word	32 * 1024
 	.weak	__stacksize__
 
-
-	.bss
+	.section .bss.saved_stack.42, "aw", %nobits
 	.align 2
 saved_stack:
 	.space 8
-
-

@@ -2,6 +2,7 @@
 #include <3ds/result.h>
 #include <3ds/os.h>
 #include <3ds/svc.h>
+#include <3ds/synchronization.h>
 #include <3ds/services/ptmsysm.h>
 
 #include <sys/time.h>
@@ -13,30 +14,24 @@ static inline double u64_to_double(u64 value) {
 	return (((double)(u32)(value >> 32))*0x100000000ULL+(u32)value);
 }
 
-typedef struct {
-	u64 date_time;
-	u64 update_tick;
-	//...
-} datetime_t;
-
-#define __datetime_selector        (*(vu32*)0x1FF81000)
-#define __datetime0 (*(volatile datetime_t*)0x1FF81020)
-#define __datetime1 (*(volatile datetime_t*)0x1FF81040)
-
 __attribute__((weak)) bool __ctru_speedup = false;
 
 //---------------------------------------------------------------------------------
 u32 osConvertVirtToPhys(const void* addr) {
 //---------------------------------------------------------------------------------
 	u32 vaddr = (u32)addr;
-	if(vaddr >= 0x14000000 && vaddr < 0x1c000000)
-		return vaddr + 0x0c000000; // LINEAR heap
-	if(vaddr >= 0x1F000000 && vaddr < 0x1F600000)
-		return vaddr - 0x07000000; // VRAM
-	if(vaddr >= 0x1FF00000 && vaddr < 0x1FF80000)
-		return vaddr + 0x00000000; // DSP memory
-	if(vaddr >= 0x30000000 && vaddr < 0x40000000)
-		return vaddr - 0x10000000; // Only available under FIRM v8+ for certain processes.
+#define CONVERT_REGION(_name) \
+	if (vaddr >= OS_##_name##_VADDR && vaddr < (OS_##_name##_VADDR + OS_##_name##_SIZE)) \
+		return vaddr + (OS_##_name##_PADDR - OS_##_name##_VADDR);
+
+	CONVERT_REGION(FCRAM);
+	CONVERT_REGION(VRAM);
+	CONVERT_REGION(OLD_FCRAM);
+	CONVERT_REGION(DSPRAM);
+	CONVERT_REGION(QTMRAM);
+	CONVERT_REGION(MMIO);
+
+#undef CONVERT_REGION
 	return 0;
 }
 
@@ -44,72 +39,74 @@ u32 osConvertVirtToPhys(const void* addr) {
 void* osConvertOldLINEARMemToNew(const void* addr) {
 //---------------------------------------------------------------------------------
 	u32 vaddr = (u32)addr;
-	if(vaddr >= 0x30000000 && vaddr < 0x40000000)return (void*)vaddr;
-	if(vaddr >= 0x14000000 && vaddr < 0x1c000000)return (void*)(vaddr+0x1c000000);
-	return 0;
-}
-
-s64 osGetMemRegionUsed(MemRegion region) {
-	s64 mem_used;
-	svcGetSystemInfo(&mem_used, 0, region);
-	return mem_used;
+	if (vaddr >= OS_FCRAM_VADDR && vaddr < (OS_FCRAM_VADDR+OS_FCRAM_SIZE))
+		return (void*)vaddr;
+	if (vaddr >= OS_OLD_FCRAM_VADDR && vaddr < (OS_FCRAM_VADDR+OS_OLD_FCRAM_SIZE))
+		return (void*)(vaddr + (OS_FCRAM_VADDR-OS_OLD_FCRAM_VADDR));
+	return NULL;
 }
 
 //---------------------------------------------------------------------------------
-static datetime_t getSysTime(void) {
+osTimeRef_s osGetTimeRef(void) {
 //---------------------------------------------------------------------------------
-	u32 s1, s2 = __datetime_selector & 1;
-	datetime_t dt;
+	osTimeRef_s tr;
+	u32 next = OS_SharedConfig->timeref_cnt;
+	u32 cur;
 
 	do {
-		s1 = s2;
-		if(!s1)
-			dt = __datetime0;
-		else
-			dt = __datetime1;
-		s2 = __datetime_selector & 1;
-	} while(s2 != s1);
+		cur = next;
+		tr = OS_SharedConfig->timeref[cur&1];
+		__dmb();
+		next = OS_SharedConfig->timeref_cnt;
+	} while (cur != next);
 
-	return dt;
+	return tr;
+}
+
+//---------------------------------------------------------------------------------
+u64 osGetTime(void) {
+//---------------------------------------------------------------------------------
+	// Read the latest time reference point published by PTM
+	osTimeRef_s tr = osGetTimeRef();
+
+	// Calculate the time elapsed since the reference point using the system clock
+	s64 elapsed_tick = svcGetSystemTick() - tr.value_tick;
+	s64 elapsed_ms = elapsed_tick * 1000 / tr.sysclock_hz;
+
+	// Apply the drift adjustment if present:
+	// Every time PTM publishes a new reference point it measures by how long the
+	// system clock has drifted with respect to the RTC. It also recalculates the
+	// system clock frequency using RTC data in order to minimize future drift.
+	// The idea behind the following logic is to reapply the inaccuracy to the
+	// calculated timestamp, but gradually reducing it to zero over the course of
+	// an hour. This ensures the monotonic growth of the returned time value.
+	const s64 hour_in_ms = 60*60*1000; // milliseconds in an hour
+	if (tr.drift_ms != 0 && elapsed_ms < hour_in_ms)
+		elapsed_ms += tr.drift_ms * (hour_in_ms - elapsed_ms) / hour_in_ms;
+
+	// Return the final timestamp
+	return tr.value_ms + elapsed_ms;
 }
 
 //---------------------------------------------------------------------------------
 int __libctru_gtod(struct _reent *ptr, struct timeval *tp, struct timezone *tz) {
 //---------------------------------------------------------------------------------
 	if (tp != NULL) {
+		// Retrieve current time, adjusting epoch from 1900 to 1970
+		s64 now = osGetTime() - 2208988800000ULL;
 
-		datetime_t dt = getSysTime();
-
-		u64 delta = svcGetSystemTick() - dt.update_tick;
-
-		u32 offset =  (u32)(u64_to_double(delta)/CPU_TICKS_PER_USEC);
-
-		// adjust from 1900 to 1970
-		u64 now = ((dt.date_time - 2208988800000ULL) * 1000) + offset;
-
-		tp->tv_sec =  u64_to_double(now)/1000000.0;
-		tp->tv_usec = now - ((tp->tv_sec) * 1000000);
-
+		// Convert to struct timeval
+		tp->tv_sec = now / 1000;
+		tp->tv_usec = (now - 1000*tp->tv_sec) * 1000;
 	}
 
 	if (tz != NULL) {
+		// Provide dummy information, as the 3DS does not have the concept of timezones
 		tz->tz_minuteswest = 0;
 		tz->tz_dsttime = 0;
 	}
 
 	return 0;
-
-}
-
-// Returns number of milliseconds since 1st Jan 1900 00:00.
-//---------------------------------------------------------------------------------
-u64 osGetTime(void) {
-//---------------------------------------------------------------------------------
-	datetime_t dt = getSysTime();
-
-	u64 delta = svcGetSystemTick() - dt.update_tick;
-
-	return dt.date_time + (u32)(u64_to_double(delta)/CPU_TICKS_PER_MSEC);
 }
 
 //---------------------------------------------------------------------------------
@@ -119,30 +116,32 @@ double osTickCounterRead(const TickCounter* cnt) {
 }
 
 //---------------------------------------------------------------------------------
-const char* osStrError(u32 error) {
+const char* osStrError(Result error) {
 //---------------------------------------------------------------------------------
-	switch((error>>26) & 0x3F) {
-	case 0:
+	switch(R_SUMMARY(error)) {
+	case RS_SUCCESS:
 		return "Success.";
-	case 1:
+	case RS_NOP:
 		return "Nothing happened.";
-	case 2:
+	case RS_WOULDBLOCK:
 		return "Would block.";
-	case 3:
+	case RS_OUTOFRESOURCE:
 		return "Not enough resources.";
-	case 4:
+	case RS_NOTFOUND:
 		return "Not found.";
-	case 5:
+	case RS_INVALIDSTATE:
 		return "Invalid state.";
-	case 6:
+	case RS_NOTSUPPORTED:
 		return "Unsupported.";
-	case 7:
+	case RS_INVALIDARG:
 		return "Invalid argument.";
-	case 8:
+	case RS_WRONGARG:
 		return "Wrong argument.";
-	case 9:
-		return "Interrupted.";
-	case 10:
+	case RS_CANCELED:
+		return "Cancelled.";
+	case RS_STATUSCHANGED:
+		return "Status changed.";
+	case RS_INTERNAL:
 		return "Internal error.";
 	default:
 		return "Unknown.";

@@ -21,7 +21,8 @@ Handle hidEvents[5];
 
 vu32* hidSharedMem;
 
-static u32 kOld, kHeld, kDown, kUp;
+static u32 kOld, kHeld, kDown, kUp, kRepeat;
+static u32 kDelay = 30, kInterval = 15, kCount = 30;
 static touchPosition tPos;
 static circlePosition cPos;
 static accelVector aVec;
@@ -29,9 +30,16 @@ static angularRate gRate;
 
 static int hidRefCount;
 
+static bool usingIrrst;
+
+bool __attribute__((weak)) hidShouldUseIrrst(void)
+{
+	bool val;
+	return R_SUCCEEDED(APT_CheckNew3DS(&val)) && val;
+}
+
 Result hidInit(void)
 {
-	bool val=false;
 	Result ret=0;
 
 	if (AtomicPostIncrement(&hidRefCount)) return 0;
@@ -52,17 +60,12 @@ Result hidInit(void)
 		goto cleanup1;
 	}
 
-	if(R_FAILED(ret=svcMapMemoryBlock(hidMemHandle, (u32)hidSharedMem, MEMPERM_READ, 0x10000000)))goto cleanup2;
+	if(R_FAILED(ret=svcMapMemoryBlock(hidMemHandle, (u32)hidSharedMem, MEMPERM_READ, MEMPERM_DONTCARE)))goto cleanup2;
 
-	APT_CheckNew3DS(&val);
-
-	if(val)
-	{
+	usingIrrst = hidShouldUseIrrst();
+	if(usingIrrst)
 		ret = irrstInit();
-	}
 
-	// Reset internal state.
-	kOld = kHeld = kDown = kUp = 0;
 	return ret;
 
 cleanup2:
@@ -83,25 +86,31 @@ void hidExit(void)
 {
 	if (AtomicDecrement(&hidRefCount)) return;
 
+	// Reset internal state.
+	kOld = kHeld = kDown = kUp = 0;
+
 	// Unmap HID sharedmem and close handles.
-	bool val=false;
 	int i; for(i=0; i<5; i++)svcCloseHandle(hidEvents[i]);
 	svcUnmapMemoryBlock(hidMemHandle, (u32)hidSharedMem);
 	svcCloseHandle(hidMemHandle);
 	svcCloseHandle(hidHandle);
 
-	APT_CheckNew3DS(&val);
-
-	if(val)
-	{
+	if(usingIrrst)
 		irrstExit();
-	}
 
 	if(hidSharedMem != NULL)
 	{
 		mappableFree((void*) hidSharedMem);
 		hidSharedMem = NULL;
 	}
+}
+
+void hidSetRepeatParameters(u32 delay, u32 interval)
+{
+	kDelay = delay;
+	kInterval = interval;
+	kCount = kDelay;
+	kRepeat = 0;
 }
 
 void hidWaitForEvent(HID_Event id, bool nextEvent)
@@ -113,6 +122,36 @@ void hidWaitForEvent(HID_Event id, bool nextEvent)
 	svcWaitSynchronization(hidEvents[id], U64_MAX);
 	if (!nextEvent)
 		svcClearEvent(hidEvents[id]);
+}
+
+Result hidWaitForAnyEvent(bool nextEvents, Handle cancelEvent, s64 timeout)
+{
+	Handle events[HIDEVENT_MAX + 2];
+	u32 numEvents = HIDEVENT_MAX + (irrstEvent != 0 ? 1 : 0) + (cancelEvent ? 1 : 0);
+
+	if (nextEvents)
+	{
+		for (u32 i = 0; i < HIDEVENT_MAX; i++)
+			svcClearEvent(hidEvents[i]);
+		svcClearEvent(irrstEvent);
+	}
+
+	memcpy(events, hidEvents, sizeof(hidEvents));
+	events[HIDEVENT_MAX] = irrstEvent;
+	events[HIDEVENT_MAX + 1] = cancelEvent;
+
+	s32 idx;
+	Result res = svcWaitSynchronizationN(&idx, events, numEvents, false, timeout);
+
+	if (res == 0 && !nextEvents)
+	{
+		// No timeout & next event
+		for (u32 i = 0; i < HIDEVENT_MAX; i++)
+			svcClearEvent(hidEvents[i]);
+		svcClearEvent(irrstEvent);
+	}
+
+	return res;
 }
 
 u32 hidCheckSectionUpdateTime(vu32 *sharedmem_section, u32 id)
@@ -165,6 +204,21 @@ void hidScanInput(void)
 	kDown = (~kOld) & kHeld;
 	kUp = kOld & (~kHeld);
 
+	if (kDelay)
+	{
+		if (kHeld != kOld)
+		{
+			kCount = kDelay;
+			kRepeat = kDown;
+		}
+
+		if (--kCount == 0)
+		{
+			kCount = kInterval;
+			kRepeat = kHeld;
+		}
+	}
+
 	Id = hidSharedMem[66 + 4];//Accelerometer
 	if(Id>7)Id=7;
 	if(hidCheckSectionUpdateTime(&hidSharedMem[66], Id)==0)
@@ -188,6 +242,13 @@ u32 hidKeysHeld(void)
 u32 hidKeysDown(void)
 {
 	return kDown;
+}
+
+u32 hidKeysDownRepeat(void)
+{
+	u32 tmp = kRepeat;
+	kRepeat = 0;
+	return tmp;
 }
 
 u32 hidKeysUp(void)

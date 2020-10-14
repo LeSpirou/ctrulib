@@ -9,7 +9,7 @@
 #include <string.h>
 #include <unistd.h>
 
-#define BUFFERSIZE 4096
+#define BUFFERSIZE 16384
 
 /** @brief Buffer */
 typedef struct buffer_t
@@ -229,9 +229,9 @@ iov_increment(iov_iter *it)
 static inline void
 iov_add(iov_iter *it, size_t size)
 {
-  while(true)
+  while(size > 0)
   {
-    assert(it->num <= it->cnt);
+    assert(it->num < it->cnt);
     assert(it->iov[it->num].size > it->pos);
 
     if(it->iov[it->num].size - it->pos > size)
@@ -244,6 +244,7 @@ iov_add(iov_iter *it, size_t size)
     // advance to next buffer
     size -= it->iov[it->num].size - it->pos;
     ++it->num;
+    assert(size == 0 || it->num < it->cnt);
     it->pos = 0;
   }
 }

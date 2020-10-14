@@ -1,17 +1,14 @@
+#include <3ds/asminc.h>
+
 .arm
 .align 4
 
 .macro SVC_BEGIN name
-	.section .text.\name, "ax", %progbits
-	.global \name
-	.type \name, %function
-	.align 2
-	.cfi_startproc
-\name:
+	BEGIN_ASM_FUNC \name
 .endm
 
 .macro SVC_END
-	.cfi_endproc
+	END_ASM_FUNC
 .endm
 
 SVC_BEGIN svcControlMemory
@@ -252,6 +249,11 @@ SVC_BEGIN svcArbitrateAddress
 	bx  lr
 SVC_END
 
+SVC_BEGIN svcArbitrateAddressNoTimeout
+	svc 0x22
+	bx  lr
+SVC_END
+
 SVC_BEGIN svcCloseHandle
 	svc 0x23
 	bx  lr
@@ -405,6 +407,16 @@ SVC_BEGIN svcOutputDebugString
 	bx  lr
 SVC_END
 
+SVC_BEGIN svcControlPerformanceCounter
+	push  {r0}
+	ldr   r0, [sp, #4+0]
+	ldr   r3, [sp, #4+4]
+	svc   0x3E
+	pop   {r3}
+	stmia r3, {r1, r2}
+	bx    lr
+SVC_END
+
 SVC_BEGIN svcCreatePort
 	push {r0, r1}
 	svc 0x47
@@ -500,6 +512,14 @@ SVC_BEGIN svcGetDmaState
 	ldr r3, [sp], #4
 	str r1, [r3]
 	bx  lr
+SVC_END
+
+SVC_BEGIN svcRestartDma
+	push {r4}
+	ldr  r4, [sp, #4]
+	svc  0x58
+	pop  {r4}
+	bx   lr
 SVC_END
 
 SVC_BEGIN svcSetGpuProt

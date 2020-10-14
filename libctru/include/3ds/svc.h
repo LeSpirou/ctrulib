@@ -57,20 +57,31 @@ typedef enum {
 	MEMPERM_READ     = 1,          ///< Readable
 	MEMPERM_WRITE    = 2,          ///< Writable
 	MEMPERM_EXECUTE  = 4,          ///< Executable
+	MEMPERM_READWRITE = MEMPERM_READ | MEMPERM_WRITE, ///< Readable and writable
+	MEMPERM_READEXECUTE = MEMPERM_READ | MEMPERM_EXECUTE, ///< Readable and executable
 	MEMPERM_DONTCARE = 0x10000000, ///< Don't care
 } MemPerm;
 
+/// Memory regions.
+typedef enum
+{
+	MEMREGION_ALL = 0,         ///< All regions.
+	MEMREGION_APPLICATION = 1, ///< APPLICATION memory.
+	MEMREGION_SYSTEM = 2,      ///< SYSTEM memory.
+	MEMREGION_BASE = 3,        ///< BASE memory.
+} MemRegion;
+
 /// Memory information.
 typedef struct {
-    u32 base_addr; ///< Base address.
-    u32 size;      ///< Size.
-    u32 perm;      ///< Memory permissions. See @ref MemPerm
-    u32 state;     ///< Memory state. See @ref MemState
+	u32 base_addr; ///< Base address.
+	u32 size;      ///< Size.
+	u32 perm;      ///< Memory permissions. See @ref MemPerm
+	u32 state;     ///< Memory state. See @ref MemState
 } MemInfo;
 
 /// Memory page information.
 typedef struct {
-    u32 flags; ///< Page flags.
+	u32 flags; ///< Page flags.
 } PageInfo;
 
 /// Arbitration modes.
@@ -123,9 +134,159 @@ typedef enum {
 
 ///@}
 
+///@name Device drivers
+///@{
+
+/// DMA transfer state.
+typedef enum {
+	DMASTATE_STARTING = 0,  ///< DMA transfer involving at least one device is starting and has not reached DMAWFP yet.
+	DMASTATE_WFP_DST = 1,   ///< DMA channel is in WFP state for the destination device (2nd loop iteration onwards).
+	DMASTATE_WFP_SRC = 2,   ///< DMA channel is in WFP state for the source device (2nd loop iteration onwards).
+	DMASTATE_RUNNING = 3,   ///< DMA transfer is running.
+	DMASTATE_DONE = 4,      ///< DMA transfer is done.
+} DmaState;
+
+/// Configuration flags for \ref DmaConfig.
+enum {
+	DMACFG_SRC_IS_DEVICE        = BIT(0), ///< DMA source is a device/peripheral. Address will not auto-increment.
+	DMACFG_DST_IS_DEVICE        = BIT(1), ///< DMA destination is a device/peripheral. Address will not auto-increment.
+	DMACFG_WAIT_AVAILABLE       = BIT(2), ///< Make \ref svcStartInterProcessDma wait for the channel to be unlocked.
+	DMACFG_KEEP_LOCKED          = BIT(3), ///< Keep the channel locked after the transfer. Required for \ref svcRestartDma.
+	DMACFG_USE_SRC_CONFIG       = BIT(6), ///< Use the provided source device configuration even if the DMA source is not a device.
+	DMACFG_USE_DST_CONFIG       = BIT(7), ///< Use the provided destination device configuration even if the DMA destination is not a device.
+};
+
+/// Configuration flags for \ref svcRestartDma.
+enum {
+	DMARST_UNLOCK           = BIT(0), ///< Unlock the channel after transfer.
+	DMARST_RESUME_DEVICE    = BIT(1), ///< Replace DMAFLUSHP instructions by NOP (they may not be regenerated even if this flag is not set).
+};
+
+/**
+ * @brief Device configuration structure, part of \ref DmaConfig.
+ * @note
+ * - if (and only if) src/dst is a device, then src/dst won't be auto-incremented.
+ * - the kernel uses DMAMOV instead of DMAADNH, when having to decrement (possibly working around an erratum);
+ * this forces all loops to be unrolled -- you need to keep that in mind when using negative increments, as the kernel
+ * uses a limit of 100 DMA instruction bytes per channel.
+ */
+typedef struct {
+	s8 deviceId;            ///< DMA device ID.
+	s8 allowedAlignments;   ///< Mask of allowed access alignments (8, 4, 2, 1).
+	s16 burstSize;          ///< Number of bytes transferred in a burst loop. Can be 0 (in which case the max allowed alignment is used as unit).
+	s16 transferSize;       ///< Number of bytes transferred in a "transfer" loop (made of burst loops).
+	s16 burstStride;        ///< Burst loop stride, can be <= 0.
+	s16 transferStride;     ///< "Transfer" loop stride, can be <= 0.
+} DmaDeviceConfig;
+
+/// Configuration stucture for \ref svcStartInterProcessDma.
+typedef struct {
+	s8 channelId;           ///< Channel ID (Arm11: 0-7, Arm9: 0-1). Use -1 to auto-assign to a free channel (Arm11: 3-7, Arm9: 0-1).
+	s8 endianSwapSize;      ///< Endian swap size (can be 0).
+	u8 flags;               ///< DMACFG_* flags.
+	u8 _padding;
+	DmaDeviceConfig srcCfg; ///< Source device configuration, read if \ref DMACFG_SRC_IS_DEVICE and/or \ref DMACFG_USE_SRC_CONFIG are set.
+	DmaDeviceConfig dstCfg; ///< Destination device configuration, read if \ref DMACFG_SRC_IS_DEVICE and/or \ref DMACFG_USE_SRC_CONFIG are set.
+} DmaConfig;
+
+///@}
 
 ///@name Debugging
 ///@{
+
+/// Operations for \ref svcControlPerformanceCounter
+typedef enum {
+	PERFCOUNTEROP_ENABLE                        = 0,    ///< Enable and lock perfmon. functionality.
+	PERFCOUNTEROP_DISABLE                       = 1,    ///< Disable and forcibly unlock perfmon. functionality.
+	PERFCOUNTEROP_GET_VALUE                     = 2,    ///< Get the value of a counter register.
+	PERFCOUNTEROP_SET_VALUE                     = 3,    ///< Set the value of a counter register.
+	PERFCOUNTEROP_GET_OVERFLOW_FLAGS            = 4,    ///< Get the overflow flags for all CP15 and SCU counters.
+	PERFCOUNTEROP_RESET                         = 5,    ///< Reset the value and/or overflow flags of selected counters.
+	PERFCOUNTEROP_GET_EVENT                     = 6,    ///< Get the event ID associated to a particular counter.
+	PERFCOUNTEROP_SET_EVENT                     = 7,    ///< Set the event ID associated to a paritcular counter.
+	PERFCOUNTEROP_SET_VIRTUAL_COUNTER_ENABLED   = 8,    ///< (Dis)allow the kernel to track counter overflows and to use 64-bit counter values.
+} PerfCounterOperation;
+
+/// Performance counter register IDs (CP15 and SCU).
+typedef enum
+{
+	// CP15 registers:
+	PERFCOUNTERREG_CORE_BASE = 0,
+	PERFCOUNTERREG_CORE_COUNT_REG_0 = PERFCOUNTERREG_CORE_BASE, ///< CP15 PMN0.
+	PERFCOUNTERREG_CORE_COUNT_REG_1,   ///< CP15 PMN1.
+	PERFCOUNTERREG_CORE_CYCLE_COUNTER, ///< CP15 CCNT.
+
+	// SCU registers
+	PERFCOUNTERREG_SCU_BASE = 0x10,
+	PERFCOUNTERREG_SCU_0 = PERFCOUNTERREG_SCU_BASE, ///< SCU MN0.
+	PERFCOUNTERREG_SCU_1,  ///< SCU MN1.
+	PERFCOUNTERREG_SCU_2,  ///< SCU MN2.
+	PERFCOUNTERREG_SCU_3,  ///< SCU MN3.
+	PERFCOUNTERREG_SCU_4,  ///< SCU MN4. Prod-N3DS only. IRQ line missing.
+	PERFCOUNTERREG_SCU_5,  ///< SCU MN5. Prod-N3DS only. IRQ line missing.
+	PERFCOUNTERREG_SCU_6,  ///< SCU MN6. Prod-N3DS only. IRQ line missing.
+	PERFCOUNTERREG_SCU_7,  ///< SCU MN7. Prod-N3DS only. IRQ line missing.
+} PerfCounterRegister;
+
+/**
+ * @brief Performance counter event IDs (CP15 or SCU).
+ * 
+ * @note Refer to:
+ *     - CP15: https://developer.arm.com/documentation/ddi0360/e/control-coprocessor-cp15/register-descriptions/c15--performance-monitor-control-register--pmnc-
+ *     - SCU: https://developer.arm.com/documentation/ddi0360/e/mpcore-private-memory-region/about-the-mpcore-private-memory-region/performance-monitor-event-registers
+ */
+typedef enum
+{
+	// Core events:
+	PERFCOUNTEREVT_CORE_BASE = 0x0,
+	PERFCOUNTEREVT_CORE_INST_CACHE_MISS = PERFCOUNTEREVT_CORE_BASE,
+	PERFCOUNTEREVT_CORE_STALL_BY_LACK_OF_INST,
+	PERFCOUNTEREVT_CORE_STALL_BY_DATA_HAZARD,
+	PERFCOUNTEREVT_CORE_INST_MICRO_TLB_MISS,
+	PERFCOUNTEREVT_CORE_DATA_MICRO_TLB_MISS,
+	PERFCOUNTEREVT_CORE_BRANCH_INST,
+	PERFCOUNTEREVT_CORE_BRANCH_NOT_PREDICTED,
+	PERFCOUNTEREVT_CORE_BRANCH_MISS_PREDICTED,
+	PERFCOUNTEREVT_CORE_INST_EXECUTED,
+	PERFCOUNTEREVT_CORE_FOLDED_INST_EXECUTED,
+	PERFCOUNTEREVT_CORE_DATA_CACHE_READ,
+	PERFCOUNTEREVT_CORE_DATA_CACHE_READ_MISS,
+	PERFCOUNTEREVT_CORE_DATA_CACHE_WRITE,
+	PERFCOUNTEREVT_CORE_DATA_CACHE_WRITE_MISS,
+	PERFCOUNTEREVT_CORE_DATA_CACHE_LINE_EVICTION,
+	PERFCOUNTEREVT_CORE_PC_CHANGED,
+	PERFCOUNTEREVT_CORE_MAIN_TLB_MISS,
+	PERFCOUNTEREVT_CORE_EXTERNAL_REQUEST,
+	PERFCOUNTEREVT_CORE_STALL_BY_LSU_FULL,
+	PERFCOUNTEREVT_CORE_STORE_BUFFER_DRAIN,
+	PERFCOUNTEREVT_CORE_MERGE_IN_STORE_BUFFER,
+	PERFCOUNTEREVT_CORE_CYCLE_COUNT = PERFCOUNTEREVT_CORE_BASE + 0xFF,     ///< One cycle elapsed.
+	PERFCOUNTEREVT_CORE_CYCLE_COUNT_64 = PERFCOUNTEREVT_CORE_BASE + 0xFFF, ///< 64 cycles elapsed.
+
+
+	PERFCOUNTEREVT_SCU_BASE = 0x1000,
+	PERFCOUNTEREVT_SCU_DISABLED = PERFCOUNTEREVT_SCU_BASE,
+	PERFCOUNTEREVT_SCU_LINEFILL_MISS_FROM_CORE0,
+	PERFCOUNTEREVT_SCU_LINEFILL_MISS_FROM_CORE1,
+	PERFCOUNTEREVT_SCU_LINEFILL_MISS_FROM_CORE2,
+	PERFCOUNTEREVT_SCU_LINEFILL_MISS_FROM_CORE3,
+	PERFCOUNTEREVT_SCU_LINEFILL_HIT_FROM_CORE0,
+	PERFCOUNTEREVT_SCU_LINEFILL_HIT_FROM_CORE1,
+	PERFCOUNTEREVT_SCU_LINEFILL_HIT_FROM_CORE2,
+	PERFCOUNTEREVT_SCU_LINEFILL_HIT_FROM_CORE3,
+	PERFCOUNTEREVT_SCU_LINE_MISSING_FROM_CORE0,
+	PERFCOUNTEREVT_SCU_LINE_MISSING_FROM_CORE1,
+	PERFCOUNTEREVT_SCU_LINE_MISSING_FROM_CORE2,
+	PERFCOUNTEREVT_SCU_LINE_MISSING_FROM_CORE3,
+	PERFCOUNTEREVT_SCU_LINE_MIGRATION,
+	PERFCOUNTEREVT_SCU_READ_BUSY_PORT0,
+	PERFCOUNTEREVT_SCU_READ_BUSY_PORT1,
+	PERFCOUNTEREVT_SCU_WRITE_BUSY_PORT0,
+	PERFCOUNTEREVT_SCU_WRITE_BUSY_PORT1,
+	PERFCOUNTEREVT_SCU_EXTERNAL_READ,
+	PERFCOUNTEREVT_SCU_EXTERNAL_WRITE,
+	PERFCOUNTEREVT_SCU_CYCLE_COUNT = PERFCOUNTEREVT_SCU_BASE + 0x1F,
+} PerfCounterEvent;
 
 /// Event relating to the attachment of a process.
 typedef struct {
@@ -393,6 +554,38 @@ static inline u32* getThreadStaticBuffers(void)
 	return (u32*)((u8*)getThreadLocalStorage() + 0x180);
 }
 
+///@name Device drivers
+///@{
+
+/// Writes the default DMA device config that the kernel uses when DMACFG_*_IS_DEVICE and DMACFG_*_USE_CFG are not set
+static inline void dmaDeviceConfigInitDefault(DmaDeviceConfig *cfg)
+{
+	// Kernel uses this default instance if _IS_DEVICE and _USE_CFG are not set
+	*cfg = (DmaDeviceConfig) {
+		.deviceId = -1,
+		.allowedAlignments = 8 | 4 | 2 | 1,
+		.burstSize = 0x80,
+		.transferSize = 0,
+		.burstStride = 0x80,
+		.transferStride = 0,
+	};
+}
+
+/// Initializes a \ref DmaConfig instance with sane defaults for RAM<>RAM tranfers
+static inline void dmaConfigInitDefault(DmaConfig *cfg)
+{
+	*cfg = (DmaConfig) {
+		.channelId = -1,
+		.endianSwapSize = 0,
+		.flags = DMACFG_WAIT_AVAILABLE,
+		._padding = 0,
+		.srcCfg = {},
+		.dstCfg = {},
+	};
+}
+
+///@}
+
 ///@name Memory management
 ///@{
 /**
@@ -477,31 +670,6 @@ Result svcUnmapProcessMemory(Handle process, u32 destAddress, u32 size);
 Result svcUnmapMemoryBlock(Handle memblock, u32 addr);
 
 /**
- * @brief Begins an inter-process DMA.
- * @param[out] dma Pointer to output the handle of the DMA to.
- * @param dstProcess Destination process.
- * @param dst Buffer to write data to.
- * @param srcprocess Source process.
- * @param src Buffer to read data from.
- * @param size Size of the data to DMA.
- * @param dmaConfig DMA configuration data.
- */
-Result svcStartInterProcessDma(Handle* dma, Handle dstProcess, void* dst, Handle srcProcess, const void* src, u32 size, void* dmaConfig);
-
-/**
- * @brief Terminates an inter-process DMA.
- * @param dma Handle of the DMA.
- */
-Result svcStopDma(Handle dma);
-
-/**
- * @brief Gets the state of an inter-process DMA.
- * @param[out] dmaState Pointer to output the state of the DMA to.
- * @param dma Handle of the DMA.
- */
-Result svcGetDmaState(void* dmaState, Handle dma);
-
-/**
  * @brief Queries memory information.
  * @param[out] info Pointer to output memory info to.
  * @param out Pointer to output page info to.
@@ -518,29 +686,6 @@ Result svcQueryMemory(MemInfo* info, PageInfo* out, u32 addr);
  */
 Result svcQueryProcessMemory(MemInfo* info, PageInfo* out, Handle process, u32 addr);
 
-/**
- * @brief Invalidates a process's data cache.
- * @param process Handle of the process.
- * @param addr Address to invalidate.
- * @param size Size of the memory to invalidate.
- */
-Result svcInvalidateProcessDataCache(Handle process, void* addr, u32 size);
-
-/**
- * @brief Cleans a process's data cache.
- * @param process Handle of the process.
- * @param addr Address to clean.
- * @param size Size of the memory to clean.
- */
-Result svcStoreProcessDataCache(Handle process, void* addr, u32 size);
-
-/**
- * @brief Flushes (cleans and invalidates) a process's data cache.
- * @param process Handle of the process.
- * @param addr Address to flush.
- * @param size Size of the memory to flush.
- */
-Result svcFlushProcessDataCache(Handle process, void const* addr, u32 size);
 ///@}
 
 
@@ -554,7 +699,7 @@ Result svcFlushProcessDataCache(Handle process, void const* addr, u32 size);
 Result svcOpenProcess(Handle* process, u32 processId);
 
 /// Exits the current process.
-void svcExitProcess() __attribute__((noreturn));
+void __attribute__((noreturn)) svcExitProcess();
 
 /**
  * @brief Terminates a process.
@@ -913,18 +1058,22 @@ Result svcCreateAddressArbiter(Handle *arbiter);
  * @param addr A pointer to a s32 value.
  * @param type Type of action to be performed by the arbiter
  * @param value Number of threads to signal if using @ref ARBITRATION_SIGNAL, or the value used for comparison.
- *
- * This will perform an arbitration based on #type. The comparisons are done between #value and the value at the address #addr.
- *
- * @code
- * s32 val=0;
- * // Does *nothing* since val >= 0
- * svcCreateAddressArbiter(arbiter,&val,ARBITRATION_WAIT_IF_LESS_THAN,0,0);
- * // Thread will wait for a signal or wake up after 10000000 nanoseconds because val < 1.
- * svcCreateAddressArbiter(arbiter,&val,ARBITRATION_WAIT_IF_LESS_THAN_TIMEOUT,1,10000000ULL);
- * @endcode
+ * @param timeout_ns Optional timeout in nanoseconds when using TIMEOUT actions, ignored otherwise. If not needed, use \ref svcArbitrateAddressNoTimeout instead.
+ * @note Usage of this syscall entails an implicit Data Memory Barrier (dmb).
+ * @warning Please use \ref syncArbitrateAddressWithTimeout instead.
  */
-Result svcArbitrateAddress(Handle arbiter, u32 addr, ArbitrationType type, s32 value, s64 nanoseconds);
+Result svcArbitrateAddress(Handle arbiter, u32 addr, ArbitrationType type, s32 value, s64 timeout_ns);
+
+/**
+ * @brief Same as \ref svcArbitrateAddress but with the timeout_ns parameter undefined.
+ * @param arbiter Handle of the arbiter
+ * @param addr A pointer to a s32 value.
+ * @param type Type of action to be performed by the arbiter
+ * @param value Number of threads to signal if using @ref ARBITRATION_SIGNAL, or the value used for comparison.
+ * @note Usage of this syscall entails an implicit Data Memory Barrier (dmb).
+ * @warning Please use \ref syncArbitrateAddress instead.
+ */
+Result svcArbitrateAddressNoTimeout(Handle arbiter, u32 addr, ArbitrationType type, s32 value);
 
 /**
  * @brief Sends a synchronized request to a session handle.
@@ -962,21 +1111,6 @@ Result svcAcceptSession(Handle* session, Handle port);
  */
 Result svcReplyAndReceive(s32* index, const Handle* handles, s32 handleCount, Handle replyTarget);
 
-/**
- * @brief Binds an event or semaphore handle to an ARM11 interrupt.
- * @param interruptId Interrupt identfier (see https://www.3dbrew.org/wiki/ARM11_Interrupts).
- * @param eventOrSemaphore Event or semaphore handle to bind to the given interrupt.
- * @param priority Priority of the interrupt for the current process.
- * @param isManualClear Indicates whether the interrupt has to be manually cleared or not (= level-high active).
- */
-Result svcBindInterrupt(u32 interruptId, Handle eventOrSemaphore, s32 priority, bool isManualClear);
-
-/**
- * @brief Unbinds an event or semaphore handle from an ARM11 interrupt.
- * @param interruptId Interrupt identfier, see (see https://www.3dbrew.org/wiki/ARM11_Interrupts).
- * @param eventOrSemaphore Event or semaphore handle to unbind from the given interrupt.
- */
-Result svcUnbindInterrupt(u32 interruptId, Handle eventOrSemaphore);
 ///@}
 
 ///@name Time
@@ -1047,6 +1181,94 @@ Result svcGetHandleInfo(s64* out, Handle handle, u32 param);
 Result svcGetSystemInfo(s64* out, u32 type, s32 param);
 
 /**
+ * @brief Sets the current kernel state.
+ * @param type Type of state to set (the other parameters depend on it).
+ */
+Result svcKernelSetState(u32 type, ...);
+///@}
+
+///@name Device drivers
+///@{
+
+/**
+ * @brief Binds an event or semaphore handle to an ARM11 interrupt.
+ * @param interruptId Interrupt identfier (see https://www.3dbrew.org/wiki/ARM11_Interrupts).
+ * @param eventOrSemaphore Event or semaphore handle to bind to the given interrupt.
+ * @param priority Priority of the interrupt for the current process.
+ * @param isManualClear Indicates whether the interrupt has to be manually cleared or not (= level-high active).
+ */
+Result svcBindInterrupt(u32 interruptId, Handle eventOrSemaphore, s32 priority, bool isManualClear);
+
+/**
+ * @brief Unbinds an event or semaphore handle from an ARM11 interrupt.
+ * @param interruptId Interrupt identfier, see (see https://www.3dbrew.org/wiki/ARM11_Interrupts).
+ * @param eventOrSemaphore Event or semaphore handle to unbind from the given interrupt.
+ */
+Result svcUnbindInterrupt(u32 interruptId, Handle eventOrSemaphore);
+
+/**
+ * @brief Invalidates a process's data cache.
+ * @param process Handle of the process.
+ * @param addr Address to invalidate.
+ * @param size Size of the memory to invalidate.
+ */
+Result svcInvalidateProcessDataCache(Handle process, u32 addr, u32 size);
+
+/**
+ * @brief Cleans a process's data cache.
+ * @param process Handle of the process.
+ * @param addr Address to clean.
+ * @param size Size of the memory to clean.
+ */
+Result svcStoreProcessDataCache(Handle process, u32 addr, u32 size);
+
+/**
+ * @brief Flushes (cleans and invalidates) a process's data cache.
+ * @param process Handle of the process.
+ * @param addr Address to flush.
+ * @param size Size of the memory to flush.
+ */
+Result svcFlushProcessDataCache(Handle process, u32 addr, u32 size);
+
+/**
+ * @brief Begins an inter-process DMA transfer.
+ * @param[out] dma Pointer to output the handle of the DMA channel object to.
+ * @param dstProcess Destination process handle.
+ * @param dstAddr Address in the destination process to write data to.
+ * @param srcProcess Source process handle.
+ * @param srcAddr Address in the source to read data from.
+ * @param size Size of the data to transfer.
+ * @param cfg Configuration structure.
+ * @note The handle is signaled when the transfer finishes.
+ */
+Result svcStartInterProcessDma(Handle *dma, Handle dstProcess, u32 dstAddr, Handle srcProcess, u32 srcAddr, u32 size, const DmaConfig *cfg);
+
+/**
+ * @brief Stops an inter-process DMA transfer.
+ * @param dma Handle of the DMA channel object.
+ */
+Result svcStopDma(Handle dma);
+
+/**
+ * @brief Gets the state of an inter-process DMA transfer.
+ * @param[out] state Pointer to output the state of the DMA transfer to.
+ * @param dma Handle of the DMA channel object.
+ */
+Result svcGetDmaState(DmaState *state, Handle dma);
+
+/**
+ * @brief Restarts a DMA transfer, using the same configuration as before.
+ * @param[out] state Pointer to output the state of the DMA transfer to.
+ * @param dma Handle of the DMA channel object.
+ * @param dstAddr Address in the destination process to write data to.
+ * @param srcAddr Address in the source to read data from.
+ * @param size Size of the data to transfer.
+ * @param flags Restart flags, \ref DMARST_UNLOCK and/or \ref DMARST_RESUME_DEVICE.
+ * @note The first transfer has to be configured with \ref DMACFG_KEEP_LOCKED.
+ */
+Result svcRestartDma(Handle dma, u32 dstAddr, u32 srcAddr, u32 size, s8 flags);
+
+/**
  * @brief Sets the GPU protection register to restrict the range of the GPU DMA. 11.3+ only.
  * @param useApplicationRestriction Whether to use the register value used for APPLICATION titles.
  */
@@ -1058,13 +1280,7 @@ Result svcSetGpuProt(bool useApplicationRestriction);
  */
 Result svcSetWifiEnabled(bool enabled);
 
-/**
- * @brief Sets the current kernel state.
- * @param type Type of state to set (the other parameters depend on it).
- */
-Result svcKernelSetState(u32 type, ...);
 ///@}
-
 
 ///@name Debugging
 ///@{
@@ -1088,6 +1304,34 @@ void svcBreakRO(UserBreakType breakReason, const void* croInfo, u32 croInfoSize)
  * @param length Length of the string to output, needs to be positive.
  */
 Result svcOutputDebugString(const char* str, s32 length);
+
+
+/**
+ * @brief Controls performance monitoring on the CP15 interface and the SCU.
+ * The meaning of the parameters depend on the operation.
+ * @param[out] out Output.
+ * @param op Operation, see details.
+ * @param param1 First parameter.
+ * @param param2 Second parameter.
+ * @details The operations are the following:
+ *     - \ref PERFCOUNTEROP_ENABLE (void) -> void, tries to enable and lock perfmon. functionality.
+ *     - \ref PERFCOUNTEROP_DISABLE (void) -> void, disable and forcibly unlocks perfmon. functionality.
+ *     - \ref PERFCOUNTEROP_GET_VALUE (\ref PerfCounterRegister reg) -> u64, gets the value of a particular counter register.
+ *     - \ref PERFCOUNTEROP_SET_VALUE (\ref PerfCounterRegister reg, u64 value) -> void, sets the value of a particular counter register.
+ *     - \ref PERFCOUNTEROP_GET_OVERFLOW_FLAGS (void) -> u32, gets the overflow flags of all CP15 and SCU registers.
+ *         - Format is a bitfield of \ref PerfCounterRegister.
+ *     - \ref PERFCOUNTEROP_RESET (u32 valueResetMask, u32 overflowFlagResetMask) -> void, resets the value and/or
+ *     overflow flags of selected registers.
+ *         - Format is two bitfields of \ref PerfCounterRegister.
+ *     - \ref PERFCOUNTEROP_GET_EVENT (\ref PerfCounterRegister reg) -> \ref PerfCounterEvent, gets the event associated
+ *     to a particular counter register.
+ *     - \ref PERFCOUNTEROP_SET_EVENT (\ref PerfCounterRegister reg, \ref PerfCounterEvent) -> void, sets the event associated
+ *     to a particular counter register.
+ *     - \ref PERFCOUNTEROP_SET_VIRTUAL_COUNTER_ENABLED (bool enabled) -> void, (dis)allows the kernel to track counter overflows
+ *     and to use 64-bit counter values.
+ */
+Result svcControlPerformanceCounter(u64 *out, PerfCounterOperation op, u32 param1, u64 param2);
+
 /**
  * @brief Creates a debug handle for an active process.
  * @param[out] debug Pointer to output the created debug handle to.

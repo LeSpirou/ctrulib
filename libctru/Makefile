@@ -8,8 +8,8 @@ endif
 
 include $(DEVKITARM)/base_rules
 
-export LIBCTRU_MAJOR	:= 1
-export LIBCTRU_MINOR	:= 6
+export LIBCTRU_MAJOR	:= 2
+export LIBCTRU_MINOR	:= 0
 export LIBCTRU_PATCH	:= 0
 
 
@@ -54,7 +54,7 @@ CFLAGS	+=	$(INCLUDE) -DARM11 -D_3DS
 
 CXXFLAGS	:= $(CFLAGS) -fno-rtti -fno-exceptions -std=gnu++11
 
-ASFLAGS	:=	-g $(ARCH)
+ASFLAGS	:=	-g $(ARCH) $(INCLUDE)
 
 #---------------------------------------------------------------------------------
 # list of directories containing libraries, this must be the top level containing

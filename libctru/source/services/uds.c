@@ -55,7 +55,7 @@ Result udsInit(size_t sharedmem_size, const char *username)
 	if(R_SUCCEEDED(ret))
 	{
 		ndm_state = 1;
-		ret = NDMU_EnterExclusiveState(EXCLUSIVE_STATE_LOCAL_COMMUNICATIONS);
+		ret = NDMU_EnterExclusiveState(NDM_EXCLUSIVE_STATE_LOCAL_COMMUNICATIONS);
 		if(R_SUCCEEDED(ret))
 		{
 			ndm_state = 2;
@@ -128,7 +128,7 @@ Result udsGenerateNodeInfo(udsNodeInfo *nodeinfo, const char *username)
 	ret = cfguInit();
 	if (R_FAILED(ret))return ret;
 
-	ret = CFGU_GetConfigInfoBlk2(sizeof(nodeinfo->uds_friendcodeseed), 0x00090000, (u8*)&nodeinfo->uds_friendcodeseed);
+	ret = CFGU_GetConfigInfoBlk2(sizeof(nodeinfo->uds_friendcodeseed), 0x00090000, &nodeinfo->uds_friendcodeseed);
 	if (R_FAILED(ret))
 	{
 		cfguExit();
